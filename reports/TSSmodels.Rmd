@@ -1,0 +1,584 @@
+---
+title: "Two Stage Selection model"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidybayes)
+library(ggplot2)
+library(rstan)
+library(bayesplot)
+library(loo)
+library(patchwork)
+# Load the data
+df_total = read.csv("../data/df_total.csv")
+source("../code/utils/stan_util.R")
+source("../code/utils/TSS_util.R")
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+resultPath= '../output/TSS_modelfit'
+if(!dir.exists(resultPath)){dir.create(resultPath)}
+```
+
+# TSS model
+
+## What is TSS model
+
+The value function is defined based on the prospect theory
+
+$$
+\begin{align*}
+V(Y;x_1, x_2, p) &= \text{value of: win } (x_1-Y) \text{ with prob }p\quad \text{or}\quad \text{loose } (Y-x_2) \text{with prob }1-p
+\end{align*}
+$$
+
+**Step 1: Coarse selection**
+
+The model choose $CE_c$ between five candidates(Y_c) between $\left[x_2, x_1\right]$$$Y_c = x_2 + (x_1-x_2)\cdot y_c\quad\text{where}\quad y_c \in \{0.1, 0.3, 0.5, 0.7, 0.9\},\quad $$
+
+The model stochastically choose Y_c with smallest $|V(Y_c)|$ via softmax selection.
+
+**Step 2: Fine selection**
+
+Similar choice is made between $[CE_c-0.04\cdot2\cdot(x_1-x_2), CE_c+0.04*2*(x_1-x_2)]$
+
+The chosen candidate become a CE.
+
+## Value function
+
+Every TSS model except(TSS6) uses the following value function
+
+$$
+V(Y; x_1, x_2, p) = (x_1-Y)^{\alpha_{\text{gain}}} - \lambda(Y-x_2)^{\alpha_{\text{loss}}}
+$$
+
+-   The model uses a parameter alpha assumes alpha_gain = alpha_loss = alpha
+
+-   The model without parameter lambda assumes lambda=1
+
+-   The parameter beta refers to reverse temperature of the softmax function.
+
+In the continuous model we modeled the CE as follows
+
+$$
+CE = (\pi(p)\cdot x_1^\alpha + (1-\pi(p))\cdot x_2^{\alpha})^{1/\alpha} + \epsilon
+$$
+
+TSS model's usage of prospect theory fundamentally differs from the continuous model.
+
+\<Note\> Since it is the discrete model, we can choose random selection model as the baseline model. The loo value of the baseline model is -1000. '**Summed delta loo**' refers to the total sum of (model loo - baseline loo).
+
+# TSS1 (B)
+
+-   free param = beta
+
+-   Prior: beta \~ exp(N(0,1))
+
+-   summed delta loo = -78 (worse than baseline)
+
+-   MCMC convergence = good (Rhat\<1.01)
+
+Simulation
+
+```{r}
+beta=0.01
+arg_list = list(V_func=V_pt, beta = beta, iter = 100)
+plot_list = plot_simul(TSS_simul, arg_list)
+p = wrap_plots(plot_list, ncol=4)+
+    plot_annotation(title=paste0('TSS1'), subtitle=paste0('beta = ',beta))
+print(p)
+```
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS1'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'TSS1'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('beta')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+```
+
+# TSS2 (G,B)
+
+-   free param = gamma, beta
+
+-   Prior: gamma, beta \~ exp(N(0,1))
+
+-   summed delta loo = -35 (worse than baseline)
+
+-   MCMC convergence = good (Rhat \< 1.01)
+
+Simulation
+
+```{r}
+# simulated data vs. observed data of S02
+beta = exp(-3.44)
+gamma = exp(-0.0081)
+arg_list = list(V_func=V_pt, V_func_arg = list(gamma=gamma), beta = beta, iter = 100)
+plot_list = plot_simul(TSS_simul, arg_list, obs_point_ID = 2)
+p = wrap_plots(plot_list, ncol=4)+
+    plot_annotation(title=paste0('TSS2'), subtitle=paste0('beta = ',round(beta,3), ' gamma = ', round(gamma,3)))
+print(p)
+```
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS2'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'TSS2'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('gamma', 'beta')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# TSS3 (G, A, B)
+
+-   free parameter = gamma, alpha, beta
+
+-   prior: gamma, alpha, beta \~ exp(N(0,1))
+
+-   summed delta loo = 403
+
+-   MCMC convergence = poor (Rhat \> 1.7 at subj 3)
+
+-   **Strong correlation between beta and alpha**
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS3'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'TSS3'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('gamma','alpha', 'beta')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# TSS4 (G, A)
+
+-   free parameter = gamma, alpha
+
+-   prior: gamma, alpha \~ exp(N(0,1))
+
+-   summed delta loo = 304
+
+-   MCMC convergence = poor (Rhat \> 2 at subj 3)
+
+```{r}
+# Setting
+modelname = 'TSS4'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'TSS4'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('gamma','alpha')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# TSS5 (G, A, L)
+
+-   free parameter = gamma, alpha, lambda
+
+-   prior: gamma, alpha, lambda \~ exp(N(0,1))
+
+-   summed delta loo = 966
+
+-   MCMC convergence = good (R\<1.01)
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS5'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'TSS5'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('gamma','alpha', 'lambda')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+Simulation
+
+```{r}
+arg_list = list(V_func=V_pt,
+                V_func_arg = list(gamma=0.02983, alpha_gain=0.4663, lambda=0.889), iter = 100)
+plot_list = plot_simul(TSS_simul, arg_list, obs_point_ID = 73)
+p = wrap_plots(plot_list, ncol=4)+
+    plot_annotation(title=paste0('TSS5'), subtitle='subj73')
+print(p)
+
+arg_list = list(V_func=V_pt,
+                V_func_arg = list(gamma=242, alpha_gain=2.387e-18, lambda=77545), iter = 100)
+plot_list = plot_simul(TSS_simul, arg_list, obs_point_ID = 73)
+p = wrap_plots(plot_list, ncol=4)+
+    plot_annotation(title=paste0('TSS5'), subtitle='subj73-recovered')
+print(p)
+```
+
+# TSS6
+
+This model uses the concept used in the continuous models. In continuous models we calculated modeled CE as follows
+
+$$
+\text{CE}_{\text{pred}}(p, x_1, x_2 ; \gamma, \alpha) = (\pi(p)\cdot x_1^\alpha + (1-\pi(p))\cdot x_2^{\alpha})^{1/\alpha}
+$$
+
+The value function of this model is
+
+$$
+V(Y;p, x_1, x_2) = |Y - \text{CE}_{\text{pred}}(p, x_1, x_2 ; \gamma, \alpha)|
+$$
+
+-   free parameter = gamma, alpha, beta
+
+-   prior: gamma, alpha, beta \~ exp(N(0,1))
+
+-   summed delta LOO = 463
+
+-   MCMC convergence = good (Rhat\<1.01)
+
+-   moderate correlation between alpha and gamma
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS6'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'TSS6'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('gamma','alpha', 'beta')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# TSS7 (G, AG, AL)
+
+-   free parameter = gamma, alpha_gain, alpha_loss
+
+    -   alpha_gain = exp(alpha_raw[1])
+
+    -   alpha_loss = exp(alpha_raw[1]+alpha_raw[2])
+
+-   prior: gamma \~ exp(N(0,1)) / alpha_raw \~ N(0,1)
+
+-   summed delta LOO = 1026
+
+-   MCMC convergence = good (Rhat \< 1.01)
+
+-   **Moderate correlation between alpha_raw[1] and alpha_raw[2] (at subj3)**
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS7'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, MCMC convergence, loo
+
+```{r}
+# Setting
+modelname = 'TSS7'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('gamma','alpha_gain', 'alpha_loss')
+vars_reparam = c('gamma', 'alpha_raw[1]', 'alpha_raw[2]')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=vars_reparam, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# TSS8 (G, AG, AL, L)
+
+-   Distance = abs
+
+-   free parameter = gamma, alpha_gain, alpha_lose, lambda
+
+-   prior: lambda \~ exp(N(0,1)) / gamma, alpha_gain/loss -\> same as TSS7
+
+-   summed delta loo = 1067
+
+-   MCMC convergence = good (Rhat \< 1.01)
+
+-   **Strong correlation between alpha_raw[2] and lambda**
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS8'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, MCMC convergence, loo
+
+```{r}
+# Setting
+modelname = 'TSS8'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('gamma','alpha_gain', 'alpha_loss', 'lambda')
+vars_reparam = c('gamma', 'alpha_raw[1]', 'alpha_raw[2]', 'lambda')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=vars_reparam, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+5 rows

@@ -1,0 +1,1429 @@
+---
+title: "MLE Analysis"
+output:
+  html_documnet:
+    df_print: default
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidybayes)
+library(ggplot2)
+library(rstan)
+library(bayesplot)
+library(loo)
+library(patchwork)
+library(GGally)
+library(irr)
+source('../code/loglik.R') # log likelihood functions for MLE optimizations
+source('../code/utils/stan_util.R') 
+source('../code/utils/TSS_util.R') 
+# Load the data
+df_total = read.csv("../data/df_total.csv")
+# Stan option
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+# Create directory to save the results
+resultPath= '../output/MLE_results'
+if(!dir.exists(resultPath)){dir.create(resultPath)}
+```
+
+This is the summary of TSS models.
+
+-   TSS_lambda model = gamma, alpha, lambda(TSS5)
+
+-   TSS_alpha model = gamma, alpha_gain, alpha_loss(TSS7)
+
+-   TSS_full model = gamma, alpha_gain, alpha_loss, lambda(TSS8)
+
+\<Note\> The summed AIC/BIC of random selection baseline model is 79667. Summed delta AIC/BIC refers to the sum of (model AIC/BIC - baseline AIC/BIC).
+
+# TSS models
+
+## TSS_lambda(TSS5)
+
+-   Free param: gamma, alpha, lambda
+-   Summed delta AIC/BIC = -34119 / -33314
+
+### Compute MLE
+
+```{r}
+modelname = 'TSS_lambda'
+iter = 10 # number of different initial values
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'TSS')
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(3), TSS_lambda.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '.rds'))
+```
+
+MLE result
+
+```{r message=FALSE}
+modelname = 'TSS_lambda'
+variables = c('gamma', 'alpha', 'lambda')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, c('gamma_raw', 'alpha_raw', 'lambda_raw'))
+df_summary[,1:3] = exp(df_summary[,1:3])
+colnames(df_summary) = c(variables, 'AIC', 'BIC')
+
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title='TSS_lambda', diag = list(continuous='barDiag'))+
+  theme_bw()
+# summed AIC/BIC
+cat('summed AIC:', round(sum(df_summary$AIC)), '\n')
+cat('summed BIC:', round(sum(df_summary$BIC)), '\n')
+cat('summed delta AIC:', round(sum(df_summary$AIC) - 2 * log(25) * (51*330+ 24*165)), '\n')
+cat('summed delta BIC:', round(sum(df_summary$BIC) - 2 * log(25) * (51*330+ 24*165)))
+```
+
+### Parameter recovery
+
+-   (All subject) gamma, alpha, lambda / r= -0.14, 0.9, -0.12
+
+-   (Except 1 outlier) gamma, alpha, lambda / r= 1, 0.99, 1
+
+Make simulated data
+
+```{r}
+modelname = 'TSS_lambda'
+variables = c('gamma', 'alpha', 'lambda')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # Change accordingly to the model ------------
+  G_i = exp(fit_list[[i]]$par[1])
+  A_i = exp(fit_list[[i]]$par[2])
+  L_i = exp(fit_list[[i]]$par[3])
+  # ---------------------------------------------
+  for(j in 1:NT){
+    idx = idx_i+j
+    # Change accordingly to the model ---------------
+    arg_list = list(gamma=G_i, alpha_gain=A_i, alpha_loss=A_i, lambda=L_i)
+    df_sim$CE[idx] = TSS_simul(p= df_sim$P_true[idx], x1= df_sim$x1[idx], x2= df_sim$x2[idx],
+                               V_func = V_pt, V_func_arg = arg_list, iter=1)
+    # ------------------------------------------------
+  }
+}
+write.csv(df_sim, file=paste0('../data/simulated/MLE/', modelname, '.csv'), row.names=FALSE)
+```
+
+Run MLE on the simulated data
+
+```{r warning=FALSE}
+modelname = 'TSS_lambda'
+iter = 10 # number of different initial values
+
+df_sim = read.csv(paste0('../data/simulated/MLE/', modelname, '.csv'))
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'TSS', df=df_sim)
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(3), TSS_lambda.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+```
+
+Visualize parameter recovery result
+
+```{r}
+modelname = 'TSS_lambda'
+variables = c('gamma', 'alpha', 'lambda')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, c('gamma_raw', 'alpha_raw', 'lambda_raw'))
+df_summary[,1:3] = exp(df_summary[,1:3])
+colnames(df_summary) = c(variables, 'AIC', 'BIC')
+
+fit_list_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MLE_summary(fit_list_rcv, c('gamma_raw', 'alpha_raw', 'lambda_raw'))
+df_summary_rcv[,1:3] = exp(df_summary_rcv[,1:3])
+colnames(df_summary_rcv) = c(variables, 'AIC', 'BIC')
+
+# All subject
+for(param in variables){
+  cor = cor(df_summary[[param]],df_summary_rcv[[param]])
+  plot(df_summary[[param]], df_summary_rcv[[param]],
+       xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+
+# Except 1 outlier(S73)
+for(param in variables){
+  cor = cor(df_summary[-73,][[param]],df_summary_rcv[-73,][[param]])
+  plot(df_summary[-73,][[param]], df_summary_rcv[-73,][[param]],
+       xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+### Test Retest reliability
+
+-   ICC of gamma, alpha, lambda = 0.82, 0.75, 0.87
+
+Compute MLE separately for session1 and session2.
+
+```{r}
+modelname = 'TSS_lambda'
+iter = 10 # number of different initial values
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# compute MLE
+fit_list_s1 = list()
+fit_list_s2 = list()
+for(i in 1:51){
+  data_s1 = make_stan_data(i, 'TSS', df=df_s1)
+  data_s2 = make_stan_data(i, 'TSS', df=df_s2)
+  # session 1
+  val_s1 = Inf
+  for(j in 1:iter){
+    fit_s1_pr = optim(rnorm(3), TSS_lambda.lik, data=data_s1)
+    val_s1_pr = fit_s1_pr$value
+    if(val_s1_pr < val_s1){val_s1 = val_s1_pr; fit_s1 = fit_s1_pr}
+  }
+  # session 2
+  val_s2 = Inf
+  for(j in 1:iter){
+    fit_s2_pr = optim(rnorm(3), TSS_lambda.lik, data=data_s2)
+    val_s2_pr = fit_s2_pr$value
+    if(val_s2_pr < val_s2){val_s2 = val_s2_pr; fit_s2 = fit_s2_pr}
+  }
+  fit_list_s1[[i]] = fit_s1
+  fit_list_s2[[i]] = fit_s2
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+```
+
+Check the test-retest reliability
+
+```{r}
+modelname = 'TSS_lambda'
+variables = c('gamma', 'alpha', 'lambda')
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+
+# summarise session1 MLE result
+df_summary_s1 = MLE_summary(fit_list_s1, c('gamma_raw', 'alpha_raw', 'lambda_raw'))
+df_summary_s1[,1:3] = exp(df_summary_s1[,1:3])
+colnames(df_summary_s1) = c(variables, 'AIC', 'BIC')
+
+# summarise session2 MLE result
+df_summary_s2 = MLE_summary(fit_list_s2, c('gamma_raw', 'alpha_raw', 'lambda_raw'))
+df_summary_s2[,1:3] = exp(df_summary_s2[,1:3])
+colnames(df_summary_s2) = c(variables, 'AIC', 'BIC')
+
+par(mfrow=c(1,3))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+par(mfrow=c(1,1))
+```
+
+## TSS_alpha(TSS7)
+
+-   Free param: gamma, alpha_gain, alpha_loss
+-   Summed AIC/BIC = -35093 / -34288
+
+### Compute MLE
+
+```{r}
+modelname = 'TSS_alpha'
+iter = 10 # number of different initial values
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'TSS')
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(3), TSS_alpha.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '.rds'))
+```
+
+MLE result
+
+```{r message=FALSE}
+modelname = 'TSS_alpha'
+variables = c('gamma', 'alpha_gain', 'alpha_loss')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, c('gamma_raw', 'alpha_raw1', 'alpha_raw2'))
+df_summary[,1:3] = exp(df_summary[,1:3])
+df_summary[,3] = df_summary[,2] * df_summary[,3]
+colnames(df_summary) = c(variables, 'AIC', 'BIC')
+
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title='TSS_full', diag = list(continuous='barDiag'))+
+  theme_bw()
+# summed AIC/BIC
+cat('summed AIC:', round(sum(df_summary$AIC)), '\n')
+cat('summed BIC:', round(sum(df_summary$BIC)), '\n')
+cat('summed delta AIC:', round(sum(df_summary$AIC) - 2 * log(25) * (51*330+ 24*165)), '\n')
+cat('summed delta BIC:', round(sum(df_summary$BIC) - 2 * log(25) * (51*330+ 24*165)))
+```
+
+### Parameter recovery
+
+-   (All subject) gamma, alpha_gain, alpha_loss / r= -0.12, 0.92, 0.93
+
+-   (Except 1 outlier) gamma, alpha_gain, alpha_loss / r= 1, 1, 0.99
+
+Make simulated data
+
+```{r}
+modelname = 'TSS_alpha'
+variables = c('gamma', 'alpha_gain', 'alpha_loss')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # Change accordingly to the model ------------
+  G_i = exp(fit_list[[i]]$par[1])
+  AG_i = exp(fit_list[[i]]$par[2])
+  AL_i = exp(fit_list[[i]]$par[2]+fit_list[[i]]$par[3])
+  # ---------------------------------------------
+  for(j in 1:NT){
+    idx = idx_i+j
+    # Change accordingly to the model ---------------
+    arg_list = list(gamma=G_i, alpha_gain=AG_i, alpha_loss=AL_i, lambda=1)
+    df_sim$CE[idx] = TSS_simul(p= df_sim$P_true[idx], x1= df_sim$x1[idx], x2= df_sim$x2[idx],
+                               V_func = V_pt, V_func_arg = arg_list, iter=1)
+    # ------------------------------------------------
+  }
+}
+write.csv(df_sim, file=paste0('../data/simulated/MLE/', modelname, '.csv'), row.names=FALSE)
+```
+
+Compute MLE on simulated data
+
+```{r}
+modelname = 'TSS_alpha'
+iter = 10 # number of different initial values
+
+df_sim = read.csv(paste0('../data/simulated/MLE/', modelname, '.csv'))
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'TSS', df=df_sim)
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(3), TSS_alpha.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+```
+
+Visualize parameter recovery result
+
+```{r}
+modelname = 'TSS_alpha'
+variables = c('gamma', 'alpha_gain', 'alpha_loss')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, c('gamma_raw', 'alpha_raw1', 'alpha_raw2'))
+df_summary[,1:3] = exp(df_summary[,1:3])
+df_summary[,3] = df_summary[,2]*df_summary[,3]
+colnames(df_summary) = c(variables, 'AIC', 'BIC')
+
+fit_list_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MLE_summary(fit_list_rcv, c('gamma_raw', 'alpha_raw1', 'alpha_raw2'))
+df_summary_rcv[,1:3] = exp(df_summary_rcv[,1:3])
+df_summary_rcv[,3] = df_summary_rcv[,2]*df_summary_rcv[,3]
+colnames(df_summary_rcv) = c(variables, 'AIC', 'BIC')
+
+# All subject
+for(param in variables){
+  cor = cor(df_summary[[param]],df_summary_rcv[[param]])
+  plot(df_summary[[param]], df_summary_rcv[[param]],
+       xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+
+# Except 1 outlier(S73)
+for(param in variables){
+  cor = cor(df_summary[-73,][[param]],df_summary_rcv[-73,][[param]])
+  plot(df_summary[-73,][[param]], df_summary_rcv[-73,][[param]],
+       xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+### Test-retest reliability
+
+-   ICC of gamma, alpha_gain, alpha_loss = 0.76, 0.74, 0.76
+
+Compute MLE separately for session1 and session2.
+
+```{r warning=FALSE}
+modelname = 'TSS_alpha'
+iter = 10 # number of different initial values
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# compute MLE
+fit_list_s1 = list()
+fit_list_s2 = list()
+for(i in 1:51){
+  data_s1 = make_stan_data(i, 'TSS', df=df_s1)
+  data_s2 = make_stan_data(i, 'TSS', df=df_s2)
+  # session 1
+  val_s1 = Inf
+  for(j in 1:iter){
+    fit_s1_pr = optim(rnorm(3), TSS_alpha.lik, data=data_s1)
+    val_s1_pr = fit_s1_pr$value
+    if(val_s1_pr < val_s1){val_s1 = val_s1_pr; fit_s1 = fit_s1_pr}
+  }
+  # session 2
+  val_s2 = Inf
+  for(j in 1:iter){
+    fit_s2_pr = optim(rnorm(3), TSS_alpha.lik, data=data_s2)
+    val_s2_pr = fit_s2_pr$value
+    if(val_s2_pr < val_s2){val_s2 = val_s2_pr; fit_s2 = fit_s2_pr}
+  }
+  fit_list_s1[[i]] = fit_s1
+  fit_list_s2[[i]] = fit_s2
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+```
+
+Check the test-retest reliability
+
+```{r}
+modelname = 'TSS_alpha'
+variables = c('gamma', 'alpha_gain', 'alpha_loss')
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+
+# summarise session1 MLE result
+df_summary_s1 = MLE_summary(fit_list_s1, c('gamma_raw', 'alpha_raw1', 'alpha_raw2'))
+df_summary_s1[,1:3] = exp(df_summary_s1[,1:3])
+df_summary_s1[,3] = df_summary_s1[,2]*df_summary_s1[,3]
+colnames(df_summary_s1) = c(variables, 'AIC', 'BIC')
+
+# summarise session2 MLE result
+df_summary_s2 = MLE_summary(fit_list_s2, c('gamma_raw', 'alpha_raw1', 'alpha_raw2'))
+df_summary_s2[,1:3] = exp(df_summary_s2[,1:3])
+df_summary_s2[,3] = df_summary_s2[,2]*df_summary_s2[,3]
+colnames(df_summary_s2) = c(variables, 'AIC', 'BIC')
+
+# test-retest correlation
+outliers = c(36, 21)
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]][-outliers]
+  y = df_summary_s2[[variables[i]]][-outliers]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+```
+
+## TSS_full(TSS8)
+
+### Compute MLE
+
+-   Free param: gamma, alpha_gain, alpha_loss, lambda
+-   Summed AIC/BIC = -61371 / -60297
+
+```{r }
+modelname = 'TSS_full'
+iter = 10 # number of different initial values
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'TSS')
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(4), TSS_full.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '.rds'))
+```
+
+MLE result
+
+```{r message=FALSE}
+modelname = 'TSS_full'
+variables = c('gamma', 'alpha_gain', 'alpha_loss', 'lambda')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, c('gamma_raw', 'alpha_raw1', 'alpha_raw2', 'lambda_raw'))
+df_summary[,1:4] = exp(df_summary[,1:4])
+df_summary[,3] = df_summary[,2] * df_summary[,3]
+colnames(df_summary) = c(variables, 'AIC', 'BIC')
+
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title='TSS_full', diag = list(continuous='barDiag'))+
+  theme_bw()
+# summed AIC/BIC
+cat('summed AIC:', round(sum(df_summary$AIC)), '\n')
+cat('summed BIC:', round(sum(df_summary$BIC)), '\n')
+cat('summed delta AIC:', round(sum(df_summary$AIC) - 2 * log(25) * (51*330+ 24*330)), '\n')
+cat('summed delta BIC:', round(sum(df_summary$BIC) - 2 * log(25) * (51*330+ 24*330)))
+```
+
+### Parameter recovery
+
+-   (All subject) gamma, alpha_gain, alpha_loss / r= -0.11, 0.65, 0.01, 0.97
+
+-   (Except 1 outlier) gamma, alpha_gain, alpha_loss / r= 1, 0.65, 0.02, 0.97
+
+Make simulated data
+
+```{r warning=FALSE}
+modelname = 'TSS_full'
+variables = c('gamma', 'alpha_gain', 'alpha_loss', 'lambda')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # Change accordingly to the model ------------
+  G_i = exp(fit_list[[i]]$par[1])
+  AG_i = exp(fit_list[[i]]$par[2])
+  AL_i = exp(fit_list[[i]]$par[2]+fit_list[[i]]$par[3])
+  L_i = exp(fit_list[[i]]$par[4])
+  # ---------------------------------------------
+  for(j in 1:NT){
+    idx = idx_i+j
+    # Change accordingly to the model ---------------
+    arg_list = list(gamma=G_i, alpha_gain=AG_i, alpha_loss=AL_i, lambda=L_i)
+    df_sim$CE[idx] = TSS_simul(p= df_sim$P_true[idx], x1= df_sim$x1[idx], x2= df_sim$x2[idx],
+                               V_func = V_pt, V_func_arg = arg_list, iter=1)
+    # ------------------------------------------------
+  }
+}
+write.csv(df_sim, file=paste0('../data/simulated/MLE/', modelname, '.csv'), row.names=FALSE)
+```
+
+Run MLE on the simulated data
+
+```{r}
+modelname = 'TSS_full'
+iter = 10 # number of different initial values
+
+df_sim = read.csv(paste0('../data/simulated/MLE/', modelname, '.csv'))
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'TSS', df=df_sim)
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(4), TSS_full.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  cat('\n')
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+```
+
+Visualize parameter recovery result
+
+```{r}
+modelname = 'TSS_full'
+variables = c('gamma', 'alpha_gain', 'alpha_loss', 'lambda')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, c('gamma_raw', 'alpha_raw1', 'alpha_raw2', 'lambda_raw'))
+df_summary[,1:4] = exp(df_summary[,1:4])
+df_summary[,3] = df_summary[,2]*df_summary[,3]
+colnames(df_summary) = c(variables, 'AIC', 'BIC')
+
+fit_list_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MLE_summary(fit_list_rcv, c('gamma_raw', 'alpha_raw1', 'alpha_raw2', 'lambda_raw'))
+df_summary_rcv[,1:4] = exp(df_summary_rcv[,1:4])
+df_summary_rcv[,3] = df_summary_rcv[,2] * df_summary_rcv[,3]
+colnames(df_summary_rcv) = c(variables, 'AIC', 'BIC')
+
+par(mfrow = c(2, 2)) 
+# All subject
+for(param in variables){
+  cor = cor(df_summary[[param]],df_summary_rcv[[param]])
+  plot(df_summary[[param]], df_summary_rcv[[param]],
+       xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+
+# Except outlier(subj21)
+for(param in variables){
+  x = df_summary[[param]][-21]
+  y = df_summary_rcv[[param]][-21]
+  cor = cor(x,y)
+  plot(x, y, xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+par(mfrow = c(1,1)) 
+```
+
+### Test-retest reliability
+
+-   ICC of gamma, alpha_gain, alpha_loss, lambda = 0.65, 0.71, 0.64, 0.23
+
+Compute MLE separately for session1 and session2.
+
+```{r warning=FALSE}
+modelname = 'TSS_full'
+iter = 10 # number of different initial values
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# compute MLE
+fit_list_s1 = list()
+fit_list_s2 = list()
+for(i in 1:51){
+  data_s1 = make_stan_data(i, 'TSS', df=df_s1)
+  data_s2 = make_stan_data(i, 'TSS', df=df_s2)
+  # session 1
+  val_s1 = Inf
+  for(j in 1:iter){
+    fit_s1_pr = optim(rnorm(4), TSS_full.lik, data=data_s1)
+    val_s1_pr = fit_s1_pr$value
+    if(val_s1_pr < val_s1){val_s1 = val_s1_pr; fit_s1 = fit_s1_pr}
+  }
+  # session 2
+  val_s2 = Inf
+  for(j in 1:iter){
+    fit_s2_pr = optim(rnorm(4), TSS_full.lik, data=data_s2)
+    val_s2_pr = fit_s2_pr$value
+    if(val_s2_pr < val_s2){val_s2 = val_s2_pr; fit_s2 = fit_s2_pr}
+  }
+  fit_list_s1[[i]] = fit_s1
+  fit_list_s2[[i]] = fit_s2
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+```
+
+Check the test-retest reliability
+
+```{r}
+modelname = 'TSS_full'
+variables = c('gamma', 'alpha_gain', 'alpha_loss', 'lambda')
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+
+# summarise session1 MLE result
+df_summary_s1 = MLE_summary(fit_list_s1, c('gamma_raw', 'alpha_raw1', 'alpha_raw2', 'lambda_raw'))
+df_summary_s1[,1:4] = exp(df_summary_s1[,1:4])
+df_summary_s1[,3] = df_summary_s1[,2]*df_summary_s1[,3]
+colnames(df_summary_s1) = c(variables, 'AIC', 'BIC')
+
+# summarise session2 MLE result
+df_summary_s2 = MLE_summary(fit_list_s2, c('gamma_raw', 'alpha_raw1', 'alpha_raw2', 'lambda_raw'))
+df_summary_s2[,1:4] = exp(df_summary_s2[,1:4])
+df_summary_s2[,3] = df_summary_s2[,2]*df_summary_s2[,3]
+colnames(df_summary_s2) = c(variables, 'AIC', 'BIC')
+
+par(mfrow=c(2,2))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+par(mfrow=c(1,1))
+```
+
+## Model Comparison
+
+```{r}
+models = c('TSS5', 'TSS7', 'TSS8')
+nameintable = c('lambda', 'alpha', 'full')
+Ks = c(3,3,4)
+N_vec = c(rep(330, 51), rep(165, 24)) 
+df_AIC = matrix(0, nrow=75, ncol=length(models))
+df_BIC = matrix(0, nrow=75, ncol=length(models))
+
+for(i in 1:length(models)){
+  modelname = models[i]
+  fit_list = readRDS(file=paste0('./MLE_results/', modelname,'.rds'))
+  df_param = MLEparams(fit_list, variables, modelcomp = TRUE, K=Ks[i], N_vec=N_vec)
+  df_AIC[,i] = df_param$AIC
+  df_BIC[,i] = df_param$BIC
+}
+df_AIC = data.frame(df_AIC, row.names=1:75)
+df_BIC = data.frame(df_BIC, row.names=1:75)
+colnames(df_AIC) = nameintable
+colnames(df_BIC) = nameintable
+df_DAIC = df_AIC - apply(df_AIC, 1, min)
+df_DBIC = df_BIC - apply(df_BIC, 1, min)
+data.frame(rbind(apply(df_DAIC,2,sum), apply(df_DBIC,2,sum)), row.names=c('summed Delta AIC', 'summed Delta BIC'))
+```
+
+# Continuous models
+
+## BLO
+
+-   summed AIC/BIC = 187184/189062
+
+### Compute MLE
+
+```{r}
+modelname = 'BLO_DMR_reparam'
+iter = 10 # number of different initial values
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'conti')
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(7), BLO.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '.rds'))
+```
+
+Visualize MLE result
+
+```{r message=FALSE}
+modelname = 'BLO_DMR_reparam'
+variables = c('center', 'Delta', 'tau', 'kappa', 'L0', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = BLO.reparam(df_summary[,1:length(variables)])
+
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title='BLO', diag = list(continuous='barDiag'))+
+  theme_bw()
+# summed AIC/BIC
+cat('summed AIC:', round(sum(df_summary$AIC)), '\n')
+cat('summed BIC:', round(sum(df_summary$BIC)))
+```
+
+### Parameter recovery
+
+-   (All subject) center, Delta, tau, kappa, L0, alpha, sigma/ r= .68, .54, .43, .64, .23, .94, .99
+
+-   (Except 4 outliers) center, Delta, tau, kappa, L0, alpha, sigma/ r= .7, .62, .63, .36, .24, .95, .99
+
+Make simulated data
+
+```{r}
+modelname = 'BLO_DMR_reparam'
+variables = c('center', 'Delta', 'tau', 'kappa', 'L0', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = BLO.reparam(df_summary[,1:length(variables)])
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # parameter setting -----------------------------------------
+  center = df_summary[i,1]
+  Delta = df_summary[i,2]
+  tau = df_summary[i,3]
+  kappa = df_summary[i,4]
+  L0 = df_summary[i,5]
+  alpha=df_summary[i,6]
+  sigma = df_summary[i,7]
+  # load data of subj i----------------------------------------
+  subj_i_vec = (idx_i+1):(idx_i+NT)
+  p = df_sim[subj_i_vec,'P_true']
+  x1 = df_sim[subj_i_vec,'x1']
+  x2 = df_sim[subj_i_vec,'x2']
+  # make simulated data of subj i----------------------------------------
+  L = tau * pmin(pmax(logit(p)-center, -Delta), Delta) # lambda(p)
+  w_p = 1/(1+ kappa * (p * (1-p))) # w_p
+  pip = inv_logit(w_p*L + (1-w_p)*L0) # pi(p)
+  CEpred = (pip * x1^alpha + (1-pip) * x2^alpha)^(1/alpha)
+  df_sim$CE[subj_i_vec] = CEpred + rnorm(NT, 0, sigma)
+}
+
+write.csv(df_sim, file=paste0('../data/simulated/MLE/', modelname, '.csv'), row.names=FALSE)
+```
+
+Check the simulated data
+
+```{r}
+df_plot = data.frame(obs=df_total[which(df_total$Task == 2), 'CE'], sim=df_sim$CE)
+df_plot%>% ggplot(aes(x=obs, y=sim))+geom_point(size=1, alpha=0.1)+
+  geom_abline(col='red',lty=2)+theme_bw()
+```
+
+Compute MLE on simulated data
+
+```{r warning=FALSE}
+modelname = 'BLO_DMR_reparam'
+iter = 10 # number of different initial values
+
+df_sim = read.csv(paste0('../data/simulated/MLE/', modelname, '.csv'))
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'conti',df=df_sim)
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(7), BLO.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+```
+
+Visualize Parameter recovery results
+
+```{r}
+modelname = 'BLO_DMR_reparam'
+variables = c('center', 'Delta', 'tau', 'kappa', 'L0', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = BLO.reparam(df_summary[,1:length(variables)])
+fit_list_rcv  = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MLE_summary(fit_list_rcv, variables)
+df_summary_rcv[,1:length(variables)] = BLO.reparam(df_summary_rcv[,1:length(variables)])
+
+par(mfrow=c(3,3))
+# All subject
+for(param in variables){
+  cor = cor(df_summary[[param]],df_summary_rcv[[param]])
+  plot(df_summary[[param]], df_summary_rcv[[param]],
+       xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+
+# Without 4 outliers
+outliers = c(6,25,44,52)
+for(param in variables){
+  x = df_summary[[param]][-outliers]
+  y = df_summary_rcv[[param]][-outliers]
+  cor = cor(x,y)
+  plot(x,y, xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+par(mfrow=c(1,1))
+```
+
+### Test Retest reliability
+
+-   ICC of center, Delta, tau, kappa, L0, alpha, sigma = -.11, .12, .04, .1, -.07, .76, .53
+
+Compute MLE separately on session 1 & 2
+
+```{r}
+modelname = 'BLO_DMR_reparam'
+iter = 10 # number of different initial values
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# compute MLE
+fit_list_s1 = list()
+fit_list_s2 = list()
+for(i in 1:51){
+  data_s1 = make_stan_data(i, 'conti', df=df_s1)
+  data_s2 = make_stan_data(i, 'conti', df=df_s2)
+  # session 1
+  val_s1 = Inf
+  for(j in 1:iter){
+    fit_s1_pr = optim(rnorm(7), BLO.lik, data=data_s1)
+    val_s1_pr = fit_s1_pr$value
+    if(val_s1_pr < val_s1){val_s1 = val_s1_pr; fit_s1 = fit_s1_pr}
+  }
+  # session 2
+  val_s2 = Inf
+  for(j in 1:iter){
+    fit_s2_pr = optim(rnorm(7), BLO.lik, data=data_s2)
+    val_s2_pr = fit_s2_pr$value
+    if(val_s2_pr < val_s2){val_s2 = val_s2_pr; fit_s2 = fit_s2_pr}
+  }
+  fit_list_s1[[i]] = fit_s1
+  fit_list_s2[[i]] = fit_s2
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+```
+
+Check test-retest reliability
+
+```{r}
+modelname = 'BLO_DMR_reparam'
+variables = c('center', 'Delta', 'tau', 'kappa', 'L0', 'alpha', 'sigma')
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+
+# summarise session1 MLE result
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+df_summary_s1 = MLE_summary(fit_list_s1, variables)
+df_summary_s1[,1:length(variables)] = BLO.reparam(df_summary_s1[,1:length(variables)])
+
+# summarise session2 MLE result
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+df_summary_s2 = MLE_summary(fit_list_s2, variables)
+df_summary_s2[,1:length(variables)] = BLO.reparam(df_summary_s2[,1:length(variables)])
+
+par(mfrow=c(3,3))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+par(mfrow=c(1,1))
+```
+
+## LLO
+
+-   Summed AIC/BIC = 189046, 190119
+
+### Compute MLE
+
+```{r}
+modelname = 'LL_DMR'
+iter = 10 # number of different initial values
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'conti')
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(4), LLO.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '.rds'))
+```
+
+Check MLE results
+
+```{r message=FALSE}
+modelname = 'LL_DMR'
+variables = c('gamma', 'L0', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = LLO.reparam(df_summary[,1:length(variables)])
+
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title='BLO', diag = list(continuous='barDiag'))+
+  theme_bw()
+# summed AIC/BIC
+cat('summed AIC:', round(sum(df_summary$AIC)), '\n')
+cat('summed BIC:', round(sum(df_summary$BIC)))
+```
+
+### Parameter Recovery
+
+-   (All subject) gamma, L0, alpha, sigma/ r= .99, .85, .92, .99
+
+-   (Except 1 outlier) gamma, L0, alpha, sigma/ r= .99, .91, .92, .99
+
+Make simulated data
+
+```{r}
+modelname = 'LL_DMR'
+variables = c('gamma', 'L0', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = LLO.reparam(df_summary[,1:length(variables)])
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # parameter setting -----------------------------------------
+  gamma = df_summary[i,1]
+  L0 = df_summary[i,2]
+  alpha=df_summary[i,3]
+  sigma = df_summary[i,4]
+  # load data of subj i----------------------------------------
+  subj_i_vec = (idx_i+1):(idx_i+NT)
+  p = df_sim[subj_i_vec,'P_true']
+  x1 = df_sim[subj_i_vec,'x1']
+  x2 = df_sim[subj_i_vec,'x2']
+  # make simulated data of subj i----------------------------------------
+  pip = inv_logit(gamma * logit(p) + (1-gamma)*L0) # pi(p)
+  CEpred = (pip * x1^alpha + (1-pip) * x2^alpha)^(1/alpha)
+  df_sim$CE[subj_i_vec] = CEpred + rnorm(NT, 0, sigma)
+}
+
+write.csv(df_sim, file=paste0('../data/simulated/MLE/', modelname, '.csv'), row.names=FALSE)
+```
+
+Compute MLE on simulated data
+
+```{r}
+modelname = 'LL_DMR'
+iter = 10 # number of different initial values
+
+df_sim = read.csv(paste0('../data/simulated/MLE/', modelname, '.csv'))
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'conti',df=df_sim)
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(4), LLO.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+```
+
+Visualize parameter recovery results
+
+```{r}
+modelname = 'LL_DMR'
+variables = c('gamma', 'L0', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = LLO.reparam(df_summary[,1:length(variables)])
+fit_list_rcv  = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MLE_summary(fit_list_rcv, variables)
+df_summary_rcv[,1:length(variables)] = LLO.reparam(df_summary_rcv[,1:length(variables)])
+
+# All subject
+for(param in variables){
+  cor = cor(df_summary[[param]],df_summary_rcv[[param]])
+  plot(df_summary[[param]], df_summary_rcv[[param]],
+       xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+
+# Without 1 outlier
+outliers = c(49)
+for(param in variables){
+  x = df_summary[[param]][-outliers]
+  y = df_summary_rcv[[param]][-outliers]
+  cor = cor(x,y)
+  plot(x,y, xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+### Test Retest Reliability
+
+-   ICC of gamma, L0, alpha, sigma = .55, .13, .37, .55
+
+Compute MLE separately on session 1 & 2.
+
+```{r}
+modelname = 'LL_DMR'
+iter = 10 # number of different initial values
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# compute MLE
+fit_list_s1 = list()
+fit_list_s2 = list()
+for(i in 1:51){
+  data_s1 = make_stan_data(i, 'conti', df=df_s1)
+  data_s2 = make_stan_data(i, 'conti', df=df_s2)
+  # session 1
+  val_s1 = Inf
+  for(j in 1:iter){
+    fit_s1_pr = optim(rnorm(4), LLO.lik, data=data_s1)
+    val_s1_pr = fit_s1_pr$value
+    if(val_s1_pr < val_s1){val_s1 = val_s1_pr; fit_s1 = fit_s1_pr}
+  }
+  # session 2
+  val_s2 = Inf
+  for(j in 1:iter){
+    fit_s2_pr = optim(rnorm(4), LLO.lik, data=data_s2)
+    val_s2_pr = fit_s2_pr$value
+    if(val_s2_pr < val_s2){val_s2 = val_s2_pr; fit_s2 = fit_s2_pr}
+  }
+  fit_list_s1[[i]] = fit_s1
+  fit_list_s2[[i]] = fit_s2
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+```
+
+Check Test-retest reliability
+
+```{r}
+modelname = 'LL_DMR'
+variables = c('gamma', 'L0', 'alpha', 'sigma')
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+
+# summarise session1 MLE result
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+df_summary_s1 = MLE_summary(fit_list_s1, variables)
+df_summary_s1[,1:length(variables)] = LLO.reparam(df_summary_s1[,1:length(variables)])
+
+# summarise session2 MLE result
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+df_summary_s2 = MLE_summary(fit_list_s2, variables)
+df_summary_s2[,1:length(variables)] = LLO.reparam(df_summary_s2[,1:length(variables)])
+
+par(mfrow=c(2,2))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+par(mfrow=c(1,1))
+```
+
+## Simple Logit
+
+-   Summed AIC/BIC = 189884/190689
+
+### Compute MLE
+
+```{r}
+modelname = 'DMR_simpleLogit'
+iter = 10 # number of different initial values
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'conti')
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(3), simpleLO.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '.rds'))
+```
+
+Visualize MLE results
+
+```{r}
+modelname = 'DMR_simpleLogit'
+variables = c('gamma', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = exp(df_summary[,1:length(variables)])
+
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title='BLO', diag = list(continuous='barDiag'))+
+  theme_bw()
+# summed AIC/BIC
+cat('summed AIC:', round(sum(df_summary$AIC)), '\n')
+cat('summed BIC:', round(sum(df_summary$BIC)))
+```
+
+### Parameter recovery
+
+-   (All subject) gamma, alpha, sigma / r= 1, 1, 0.99
+
+Make simulated data
+
+```{r}
+modelname = 'DMR_simpleLogit'
+variables = c('gamma', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = exp(df_summary[,1:length(variables)])
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # parameter setting -----------------------------------------
+  gamma = df_summary[i,1]
+  alpha=df_summary[i,2]
+  sigma = df_summary[i,3]
+  # load data of subj i----------------------------------------
+  subj_i_vec = (idx_i+1):(idx_i+NT)
+  p = df_sim[subj_i_vec,'P_true']
+  x1 = df_sim[subj_i_vec,'x1']
+  x2 = df_sim[subj_i_vec,'x2']
+  # make simulated data of subj i----------------------------------------
+  pip = inv_logit(gamma * logit(p)) # pi(p)
+  CEpred = (pip * x1^alpha + (1-pip) * x2^alpha)^(1/alpha)
+  df_sim$CE[subj_i_vec] = CEpred + rnorm(NT, 0, sigma)
+}
+
+write.csv(df_sim, file=paste0('../data/simulated/MLE/', modelname, '.csv'), row.names=FALSE)
+```
+
+Compute MLE on simulated data
+
+```{r}
+modelname = 'DMR_simpleLogit'
+iter = 10 # number of different initial values
+
+df_sim = read.csv(paste0('../data/simulated/MLE/', modelname, '.csv'))
+fit_list = list()
+for(i in 1:75){
+  data = make_stan_data(i, 'conti',df=df_sim)
+  val = Inf
+  for(j in 1:iter){
+    fit_pr = optim(rnorm(3), simpleLO.lik, data=data)
+    val_pr = fit_pr$value
+    if(val_pr < val){val = val_pr; fit = fit_pr}
+  }
+  fit_list[[i]] = fit
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+```
+
+Visualize parameter recovery result
+
+```{r}
+modelname = 'DMR_simpleLogit'
+variables = c('gamma', 'alpha', 'sigma')
+
+fit_list = readRDS(paste0(resultPath, '/', modelname, '.rds'))
+df_summary = MLE_summary(fit_list, variables)
+df_summary[,1:length(variables)] = exp(df_summary[,1:length(variables)])
+fit_list_rcv  = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MLE_summary(fit_list_rcv, variables)
+df_summary_rcv[,1:length(variables)] = exp(df_summary_rcv[,1:length(variables)])
+
+# All subject
+for(param in variables){
+  cor = cor(df_summary[[param]],df_summary_rcv[[param]])
+  plot(df_summary[[param]], df_summary_rcv[[param]],
+       xlab='simulated parameter', ylab='recovered parameter', main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+### Test retest reliability
+
+-   ICC of gamma, L0, alpha, sigma = .61, .85, .55
+
+Compute MLE separately on session 1 & 2
+
+```{r}
+modelname = 'DMR_simpleLogit'
+iter = 10 # number of different initial values
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# compute MLE
+fit_list_s1 = list()
+fit_list_s2 = list()
+for(i in 1:51){
+  data_s1 = make_stan_data(i, 'conti', df=df_s1)
+  data_s2 = make_stan_data(i, 'conti', df=df_s2)
+  # session 1
+  val_s1 = Inf
+  for(j in 1:iter){
+    fit_s1_pr = optim(rnorm(3), simpleLO.lik, data=data_s1)
+    val_s1_pr = fit_s1_pr$value
+    if(val_s1_pr < val_s1){val_s1 = val_s1_pr; fit_s1 = fit_s1_pr}
+  }
+  # session 2
+  val_s2 = Inf
+  for(j in 1:iter){
+    fit_s2_pr = optim(rnorm(3), simpleLO.lik, data=data_s2)
+    val_s2_pr = fit_s2_pr$value
+    if(val_s2_pr < val_s2){val_s2 = val_s2_pr; fit_s2 = fit_s2_pr}
+  }
+  fit_list_s1[[i]] = fit_s1
+  fit_list_s2[[i]] = fit_s2
+  message(paste("✓ Subj", i, "completed."))
+}
+saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+```
+
+Check test retest reliability result
+
+```{r}
+modelname = 'DMR_simpleLogit'
+variables = c('gamma', 'alpha', 'sigma')
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+
+# summarise session1 MLE result
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+df_summary_s1 = MLE_summary(fit_list_s1, variables)
+df_summary_s1[,1:length(variables)] = exp(df_summary_s1[,1:length(variables)])
+
+# summarise session2 MLE result
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+df_summary_s2 = MLE_summary(fit_list_s2, variables)
+df_summary_s2[,1:length(variables)] = exp(df_summary_s2[,1:length(variables)])
+
+par(mfrow=c(1,3))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+par(mfrow=c(1,1))
+```
+
+## Model Comparison
+
+```{r}
+models = c('BLO_DMR_reparam', 'LLO_DMR', 'DMR_simpleLogit', 'BsimpleLO')
+nameintable = c('BLO', 'LLO', 'simpleLO', 'BsimpleLO')
+Ks = c(7,4,3,5)
+N_vec = c(rep(330, 51), rep(165, 24)) 
+df_AIC = matrix(0, nrow=75, ncol=length(models))
+df_BIC = matrix(0, nrow=75, ncol=length(models))
+
+for(i in 1:length(models)){
+  modelname = models[i]
+  fit_list = readRDS(file=paste0('./MLE_results/', modelname,'.rds'))
+  df_param = MLEparams(fit_list, variables, modelcomp = TRUE, K=Ks[i], N_vec=N_vec)
+  df_AIC[,i] = df_param$AIC
+  df_BIC[,i] = df_param$BIC
+}
+df_AIC = data.frame(df_AIC, row.names=1:75)
+df_BIC = data.frame(df_BIC, row.names=1:75)
+colnames(df_AIC) = nameintable
+colnames(df_BIC) = nameintable
+df_DAIC = df_AIC - apply(df_AIC, 1, min)
+df_DBIC = df_BIC - apply(df_BIC, 1, min)
+data.frame(rbind(apply(df_DAIC,2,sum), apply(df_DBIC,2,sum)), row.names=c('summed Delta AIC', 'summed Delta BIC'))
+```
+
+```{r message=FALSE}
+models = c('TSS5', 'TSS7', 'TSS8', 'BLO_DMR_reparam', 'LLO_DMR', 'DMR_simpleLogit', 'BsimpleLO')
+modelsinplot = c('TSS_L', 'TSS_A', 'TSS_F', 'BLO', 'LLO', 'SL', 'BSL')
+df_gamma = matrix(0, nrow=75, ncol=length(models))
+for(i in 1:length(models)){
+  fit_list = readRDS(file=paste0('./MLE_results/', models[i], '.rds'))
+  variables = 'gamma'
+  if('tau' %in% names(fit_list[[1]]$par)){variables='tau'}
+  df_param = MLEparams(fit_list, variables)
+  df_gamma[,i] = df_param[[variables]]
+}
+df_gamma = data.frame(df_gamma, row.names=1:75)
+colnames(df_gamma) = modelsinplot
+
+remove_outliers <- function(df) {
+  outlier_rows <- rep(FALSE, nrow(df))
+  
+  for (col in names(df)) {
+    x <- df[[col]]
+    if (is.numeric(x)) {
+      q1 <- quantile(x, 0.25, na.rm = TRUE)
+      q3 <- quantile(x, 0.75, na.rm = TRUE)
+      iqr <- q3 - q1
+      lower <- q1 - 1.5 * iqr
+      upper <- q3 + 1.5 * iqr
+      outlier_rows <- outlier_rows | x < lower | x > upper
+    }
+  }
+  
+  df_clean <- df[!outlier_rows, ]
+  return(df_clean)
+}
+
+df_gamma_refine = remove_outliers(df_gamma)
+
+df_gamma_refine %>% ggpairs(title='gamma over different models(outliers removed)', diag = list(continuous='barDiag'))+
+  theme_bw()
+
+df_gamma%>% ggpairs(title='gamma over different models', diag = list(continuous='barDiag'))+
+  theme_bw()
+```

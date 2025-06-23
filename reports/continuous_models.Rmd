@@ -1,0 +1,679 @@
+---
+title: "Continuous models"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidybayes)
+library(ggplot2)
+library(rstan)
+library(bayesplot)
+library(loo)
+library(patchwork)
+# Load the data
+df_total = read.csv("../data/df_total.csv")
+source("../code/utils/stan_util.R")
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+resultPath= '../output/continuous_modelfit'
+if(!dir.exists(resultPath)){dir.create(resultPath)}
+```
+
+# 1. Expected Utility
+
+$$
+\begin{align*}
+\text{CE_pred} &= U^{-1}\left( pU(x_1) + (1-p)U(x_2)\right) + \epsilon_\text{CE}\\
+U(x) &= x^{\alpha}
+\end{align*}
+$$
+
+-   free parameter: $\alpha, \sigma_\text{CE}$
+
+-   Prior: alpha, sigma \~ cauchy(0,5)
+
+-   Summed loo(S01-S05) = -8561
+
+-   MCMC convergence = good (Rhat\<1.01)
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'EU_DMR'
+Nsubj = 5
+RUN = FALSE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'EU_DMR'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('alpha', 'sigmaCE')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 2. Linear Logit
+
+$$
+\begin{align*}
+\pi(p) &= \text{inv_logit}(\gamma\cdot\text{logit}(p) + (1-\gamma)\cdot L0)\\
+\text{CE_pred} &= (\pi(p)x_1^\alpha + (1-\pi(p))x_2^\alpha)^{1/\alpha} + \epsilon_\text{CE}
+\end{align*}
+$$
+
+-   free parameter: gamma, L0, alpha, sigma
+
+-   Prior: L0 \~ N(0,1) / alpha, gamma \~ exp(N(0,1)) / sigmaCE \~ cauchy(0,5)
+
+-   Summed loo(S01-S05) = -7762
+
+-   MCMC convergence = good (Rhat\<1.01)
+
+-   **high correlation between L0 and alpha**
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'LL_DMR'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'LL_DMR'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('gamma', 'L0', 'alpha', 'sigmaCE')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 3. LL no alpha
+
+$$
+\begin{align*}
+\pi(p) &= \text{inv_logit}(a\cdot\text{logit}(p) + b)\\
+\text{CE_pred} &= \pi(p)x_1 + (1-\pi(p))x_2 + \epsilon_\text{CE}\\
+\end{align*}
+$$
+
+-   free parameter: a, b, sigmaCE
+
+-   Prior: a, b \~ normal(0,1) / sigmaCE \~ cauchy(0,5)
+
+-   Summed loo(S01-S05) = -7782
+
+-   MCMC convergence = good (Rhat\<1.01)
+
+-   moderate correlation between a and b
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'LLnoal_DMR'
+Nsubj = 5
+RUN = FALSE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'LLnoal_DMR'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables = c('a', 'b', "sigmaCE")
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 4. BLO
+
+$$
+\begin{align*}
+\lambda(p) &= \text{clip }\text{logit}(p)\text{ between }[\Delta^{-}, \Delta{+}]\ \Rightarrow \text{linear transformation between }[-\tau\Delta,+ \tau\Delta]\quad&&(\text{Thurstone scale})\\
+w_p&=\frac{1}{1+\kappa p(1-p)}\quad &&(\text{variance compensation})\\
+\pi(p) &= \text{inv_logit}(w_p\cdot\lambda(p)+(1-w_p)\cdot L0)
+\end{align*}
+$$
+
+-   free parameter: tau, center, delta, kappa, L0, alpha, sigma
+
+-   Prior
+
+    -   tau, kappa, alpha \~ exp(normal(0,1)) / sigma \~ cauchy(0,5)
+
+    -   L0 \~ (2\*inv_logit(normal(0,1))-1) \* 10
+
+    -   center \~ (2\*inv_logit(normal(0,1))-1) \* 4.59
+
+    -   delta \~ inv_logit(normal(0,1)) \* 4.59
+
+-   Summed loo(S01-S05) = -7753
+
+-   **MCMC convergence = poor (Rhat \< 1.14)**
+
+-   **Strong correlation across parameters, multimodal distribution**
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_reparam'
+Nsubj = 5
+RUN = FALSE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_reparam'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables =  c("center", "Delta", "tau", "kappa", "L0")
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 5. BLO softclip
+
+$$
+\begin{align*}
+\lambda(p) &= \tau\Delta\cdot\tanh\left(\frac{\text{logit}(p)-center}{\Delta}\right)\quad&&(\text{Thurstone scale})\\
+w_p&=\frac{1}{1+\kappa p(1-p)}\quad &&(\text{variance compensation})\\
+\pi(p) &= \text{inv_logit}\left(w_p\cdot\lambda(p)+(1-w_p)\cdot center\right)
+\end{align*}
+$$
+
+-   free parameter: tau, center, delta, kappa, L0, alpha, sigma
+
+-   Prior = same as BLO model
+
+-   Summed loo(S01-S05) = -7756
+
+-   **MCMC convergence = poor (Rhat \< 3.8)**
+
+-   **Strong correlation across parameters, multimodal distribution**
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_softclip_reparam'
+Nsubj = 5
+RUN = FALSE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_softclip_reparam'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables =  c("center", "Delta", "tau", "kappa", "L0")
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 6. BLO no kappa
+
+Softclip + no variation compensation(no kappa)
+
+-   free parameter: tau, Deltaminus, Delta, L0, alpha, sigma
+
+-   Prior:
+
+    -   DeltaMinus \~ normal(0, 4.59)
+
+    -   Delta \~ normal(2.295, 2.295)
+
+    -   L0 \~ normal(0,10)
+
+    -   tau, alpha \~ exp(normal(0,1)
+
+    -   sigma \~ cauchy(0,5)
+
+-   Summed loo(S01-S05) = -7824
+
+-   MCMC convergence = good-moderate (Rhat \< 1.02)
+
+-   **Strong correlation across parameters**
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_nok'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_nok'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables =  c("DeltaMinus", "DeltaPlus", "tau_raw", "L0", "sigmaCE", "alpha_raw")
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 7. BLO no kappa - revised
+
+$$
+\begin{align*}
+\pi(p) &= \text{inv_logit}\left(\tau\Delta\cdot\tanh\left(\frac{\text{logit}(p)-center}{\Delta}\right)+center\right)
+\end{align*}
+$$
+
+-   BLO no kappa model with few modifications
+
+    -   1\. "L0" is fixed to "center" so one free parameter is reduced
+
+    -   2\. Use pi(1-p) instead of (1-pi(p)) when calculating predicted CE
+
+<!-- -->
+
+-   Summed loo(S01-S05) = -7783
+
+-   MCMC convergence = good (Rhat \< 1.01)
+
+-   moderate correlation between variables
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_nok_re'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_nok_re'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables =  c('center', 'Delta', 'tau_raw', 'alpha_raw', 'sigmaCE')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 8. BLO no clipping
+
+No clipping(No Delta). Scaling + variance compensation with reparameterization.
+
+However, this model ignores the case when gamma \> 1.
+
+$$
+\begin{align*}
+\pi(p) &= \frac{\text{logit}(p) -L0}{A'+B'\cdot p\cdot (1-p)}+L0\quad\text{where}\ A',B'\geq 1\\
+or\quad &=\frac{\text{logit}(p)-L0}{\exp(\exp(A))+\exp(\exp(B))\cdot p\cdot (1-p)}+L0
+\end{align*}
+$$
+
+-   free parameter: A, B, L0, alpha, sigma
+
+-   Prior: A, B \~ N(0,1) / L0 \~ N(0,10) / alpha \~ exp(N(0,1)) / sigma \~ cauchy(0,5)
+
+-   Summed loo(S01-S05) = -7764
+
+-   MCMC convergence = good (Rhat \< 1.01)
+
+-   moderate correlation between parameters
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_nod'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'BLO_DMR_nod'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables =  c('A', 'B', 'alpha_raw', 'L0', 'sigmaCE')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 9. LL - revised
+
+Linear Logit model with a modification: use pi(1-p) instead of (1-pi(p)) when calculating predicted CE
+
+-   free parameter: a, b, alpha, sigma
+
+<!-- -->
+
+-   Prior: a, b \~ N(0,1) / alpha \~ exp(N(0,1)) / sigma \~ cauchy(0,5)
+
+-   Summed loo(S01-S05) = -7770
+
+-   MCMC convergence = good (R\<1.01)
+
+-   **Correlation between b and alpha has reduced but there the correlation still remains moderately**
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'LL_DMR_re'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'LL_DMR_re'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables =  c('a', 'b', 'alpha_raw', 'sigmaCE')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```
+
+# 10. simple LL
+
+$$
+\begin{align*}
+\pi(p) &= \text{inv_logit}(\gamma \cdot \text{logit}(p))\\
+CE  &= (\pi(p) \cdot x_1^\alpha + (1-\pi(p))\cdot x_2^\alpha)^{1/\alpha} + \sigma_{CE}
+\end{align*}
+$$
+
+-   free parameter: gamma, alpha, sigma
+
+-   prior: gamma, alpha \~ exp(N(0,1)) / sigma \~ cauchy(0,5)
+
+-   Summed loo(S01-S05) = -7780
+
+-   MCMC convergence = good (R\<1.01)
+
+-   mild correlation between alpha, gamma (only at S05)
+
+Run MCMC
+
+```{r}
+# Setting
+modelname = 'DMR_simpleLogit'
+Nsubj = 5
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(file = paste0('../code/stanmodel/continuous/', modelname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Posterior mean/distribution, convergence diagnosis, generalizability
+
+```{r}
+# Setting
+modelname = 'DMR_simpleLogit'
+fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+variables =  c('gamma' ,'alpha', 'sigmaCE')
+
+# Posterior mean & convergence diagnosis
+df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+df_summary
+# Summed loo
+cat('summed loo:', sum(df_summary$loo))
+# Trace plot
+for(i in 1:length(fit_list)){
+  print(traceplot(fit_list[[i]], pars=c(variables, 'lp__')))
+}
+# Posterior distribution
+for(i in 1:5){
+  fit = fit_list[[i]]
+  print(mcmc_pairs(fit, pars=variables, off_diag_args = list(size=1, alpha=0.1)))
+}
+```

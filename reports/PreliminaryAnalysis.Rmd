@@ -1,0 +1,342 @@
+---
+title: "Preliminary Analysis"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+df_total = read.csv("../data/df_total.csv")
+```
+
+# Data Processing
+
+## About raw data
+
+columns of raw data: Subject#, Session#, Block#, Stim#, Trial#, Task, Numerosity, P_true, P_reported, x1, x2, CE
+
+-   Participants in the JDA group (N=51) completed two sessions of the task on two different days.
+
+-   Participants in the JDB group (N=24) completed a single session of the task.
+
+-   Task: 1=JRF, 2=DMR
+
+## Processed data
+
+All subjects data are merged into 'df_total' with slight modifications.
+
+-   SubjIDs of JDB(S01-S24) are replaced to (S52-S75)
+
+-   The columns are replaced to: SubjID, Session, Block, Stim, Trial, Task, Numerosity, P_true, P_reported, x1, x2, CE
+
+```{r}
+# setting
+dataPath = '../data/raw'
+JDA_num = 51
+JDB_num = 24
+df_total = NULL
+
+# Merge JDA(S01-S51) data
+for(i in 1:JDA_num){
+  if(i<= 9){subj = paste0('S0',i)}else{subj= paste0('S',i)}
+  filePath = paste0(dataPath,'/ExpJDA_',subj,'.txt')
+  df_tmp = read.delim(filePath, header = TRUE, check.names = FALSE, fill = TRUE)
+  df_tmp = df_tmp[,1:12]
+  colnames(df_tmp) = c('SubjID', 'Session', 'Block', 'Stim', 'Trial', 'Task', 'Numerosity', 'P_true', 'P_reported', 'x1', 'x2', 'CE')
+  df_tmp$SubjID = rep(i, nrow(df_tmp))
+  if(is.null(df_total)){df_total = df_tmp}else{
+    df_total = rbind(df_total, df_tmp)
+  }
+}
+
+# Merge JDB(S52-S75) data
+for(i in 1:JDB_num){
+  if(i<= 9){subj = paste0('S0',i)}else{subj= paste0('S',i)}
+  filePath = paste0(dataPath,'/ExpJDB_',subj,'.txt')
+  df_tmp = read.delim(filePath, header = TRUE, check.names = FALSE, fill = TRUE)
+  df_tmp = df_tmp[,1:12]
+  colnames(df_tmp) = c('SubjID', 'Session', 'Block', 'Stim', 'Trial', 'Task', 'Numerosity', 'P_true', 'P_reported', 'x1', 'x2', 'CE')
+  # change subjID
+  df_tmp$SubjID = rep(i+51, nrow(df_tmp))
+  df_total = rbind(df_total, df_tmp)
+}
+
+# Save the merged data
+write.csv(df_total,file = '../data/df_total.csv',fileEncoding = 'UTF-8', row.names=FALSE)
+```
+
+# DMR Summary
+
+Participants choose the certainty equivalence(CE) of the given gamble.
+
+-   Gamble(p,x1,x2) = [gain x1 with prob of p] or [gain x2 with prob of 1-p]
+
+-   15 combinations of outcomes X 11 levels of probabilities.
+
+-   Outcomes (x1,x2): 25-0, 50-0, 75-0, 100-0, 150-0, 200-0, 400-0, 800-0, 50-25, 75-50, 100-50, 150-50, 150-100, 200-100, 200-150
+
+-   Probabilities (p): .01, .05, .10, .25, .40, .50, .60, .75, .90, .95, .99
+
+### [p1 vs. CE] plot for each gamble output(x1, x2)
+
+```{r}
+x1_vec = c(25, 50, 75, 100, 150, 200, 400, 800, 50, 75, 100, 150, 150, 200, 200)
+x2_vec = c(0, 0, 0, 0, 0, 0, 0, 0, 25, 50, 50, 50, 100, 100, 150)
+
+
+plot_list = list()
+for(i in 1:15){
+  # assign x1, x2 value
+  x1_val = x1_vec[i]
+  x2_val = x2_vec[i]
+  # subset the data(Task2= DMR)
+  df_ex = df_total %>% filter(Task==2, x1==x1_val, x2==x2_val) %>% select(P_true, CE)
+  # make summary statistics
+  df_summary <- df_ex %>% group_by(P_true) %>%
+  summarise(
+    q1 = quantile(CE, 0.2, na.rm = TRUE),
+    q2 = quantile(CE, 0.4, na.rm = TRUE),
+    q3 = quantile(CE, 0.6, na.rm = TRUE),
+    q4 = quantile(CE, 0.8, na.rm = TRUE),
+    CE_mean = mean(CE, na.rm = TRUE)
+  ) %>%
+  mutate(expected_value = P_true * x1_val + (1 - P_true) * x2_val)
+  # make plot
+  p= df_summary %>% ggplot(aes(x=P_true))+
+    geom_ribbon(aes(ymin = q1, ymax = q4), fill = "grey70") +
+    geom_ribbon(aes(ymin = q2, ymax = q3), fill = "grey50") +
+    geom_line(aes(y = CE_mean))+
+    geom_line(aes(y = expected_value),color = "red",linetype = "dashed")+
+    theme_classic()+
+    labs(title=paste0('X1, X2 = ',x1_val,', ',x2_val))+xlab('p1')+ylab('CE')
+  plot_list[[i]] = p
+}
+
+# Display in 4 x 4 grid
+wrap_plots(plot_list, ncol = 4)
+```
+
+### [p1 vs. CE] for each subject
+
+Save the [p1 vs. CE] plot for each subject
+
+```{r}
+# Setting
+plotPath= '../output/CE_ind'
+if(!dir.exists(plotPath)){dir.create(plotPath)}
+
+
+for(SubjID_val in 1:75){
+  filename= paste0(plotPath,'/p_CE_subj',SubjID_val,'.png')
+  df_ind = df_total %>% filter(SubjID==SubjID_val)
+  x1_val_vec = c(25, 50, 75, 100, 150, 200, 400, 800, 50, 75, 100, 150, 150, 200, 200)
+  x2_val_vec = c(0, 0, 0, 0, 0, 0, 0, 0, 25, 50, 50, 50, 100, 100, 150)
+  plot_list = list()
+  for(i in 1:15){
+    # assign x1, x2 value
+    x1_val = x1_val_vec[i]
+    x2_val = x2_val_vec[i]
+    # subset the data(Task2= DMR)
+    df_ex = df_ind %>% filter(Task==2, x1==x1_val, x2==x2_val) %>% select(P_true, CE) %>%
+      mutate(expected_value = P_true * x1_val + (1 - P_true) * x2_val)
+    # make summary df
+    df_summary = df_ex %>% group_by(P_true) %>%
+    summarise(
+      CE_min = min(CE),
+      CE_max = max(CE),
+      CE_mean = mean(CE, na.rm = TRUE)
+    )
+    # make plot
+    p= df_ex %>% ggplot(aes(x=P_true))+
+      geom_ribbon(data=df_summary, aes(x=P_true, ymin=CE_min, ymax=CE_max), fill='grey90')+
+      geom_line(data=df_summary, aes(x=P_true, y=CE_mean ),color = "blue",linetype = "solid")+
+      geom_line(aes(y = expected_value),color = "red",linetype = "dashed")+
+      geom_point(aes(y=CE))+
+      labs(title=paste0('X1, X2 = ',x1_val,', ',x2_val))+xlab(NULL)+ylab(NULL)+
+      theme_classic()
+    plot_list[[i]] = p
+  }
+  # Display in 4 x 4 grid
+  p = wrap_plots(plot_list, ncol = 4)+
+    plot_annotation(title=paste0('Subj',SubjID_val),
+                    subtitle='p1 vs. CE plot')
+  ggsave(filename, plot = p, width=11, height=10)
+}
+```
+
+### [p vs. pi(p)] for each subject
+
+Suppose CE = pi(p1)\*x1 + (1-pi(p1))\*x2 then,
+
+$$
+\pi(p_1) = \frac{(CE - x_2)}{x_1-x_2}
+$$
+
+```{r}
+# Setting
+plotPath= '../output/pip_ind'
+if(!dir.exists(plotPath)){dir.create(plotPath)}
+
+for(SubjID_val in 1:75){
+  filename= paste0(plotPath,'/pi_p_subj',SubjID_val,'.png')
+  df_ind = df_total %>% filter(Task ==2, SubjID==SubjID_val) %>%
+    mutate(pi_p = (CE-x2)/(x1-x2))
+  x1_val_vec = c(25, 50, 75, 100, 150, 200, 400, 800, 50, 75, 100, 150, 150, 200, 200)
+  x2_val_vec = c(0, 0, 0, 0, 0, 0, 0, 0, 25, 50, 50, 50, 100, 100, 150)
+  plot_list = list()
+  for(i in 1:15){
+    # assign x1, x2 value
+    x1_val = x1_val_vec[i]
+    x2_val = x2_val_vec[i]
+    # subset the data(Task2= DMR)
+    df_ex = df_ind %>% filter(Task==2, x1==x1_val, x2==x2_val) %>% select(P_true, pi_p)
+    # make summary df
+    df_summary = df_ex %>% group_by(P_true) %>%
+    summarise(
+      pip_min = min(pi_p),
+      pip_max = max(pi_p),
+      pip_mean = mean(pi_p, na.rm = TRUE)
+    )
+    # make plot
+    p= df_ex %>% ggplot(aes(x=P_true))+
+      geom_ribbon(data=df_summary, aes(x=P_true, ymin=pip_min, ymax=pip_max), fill='grey90')+
+      geom_line(data=df_summary, aes(x=P_true, y=pip_mean ),color = "blue",linetype = "solid")+
+      geom_line(aes(y = P_true), color = "red",linetype = "dashed")+
+      geom_point(aes(y=pi_p))+
+      labs(title=paste0('X1, X2 = ',x1_val,', ',x2_val))+xlab(NULL)+ylab(NULL)+
+      theme_classic()
+    plot_list[[i]] = p
+  }
+  # ADD plot containing all (x1, x2)2
+  # make summary df
+  df_summary = df_ind %>% group_by(P_true) %>%
+  summarise(
+    q1 = quantile(pi_p, 0.2, na.rm = TRUE),
+    q2 = quantile(pi_p, 0.4, na.rm = TRUE),
+    q3 = quantile(pi_p, 0.6, na.rm = TRUE),
+    q4 = quantile(pi_p, 0.8, na.rm = TRUE),
+    pip_mean = mean(pi_p, na.rm = TRUE)
+  )
+  # make plot
+  p= df_summary %>% ggplot(aes(x=P_true))+
+    geom_ribbon(aes(ymin = q1, ymax = q4), fill = "grey70") +
+    geom_ribbon(aes(ymin = q2, ymax = q3), fill = "grey50") +
+    geom_line(aes(x=P_true, y=pip_mean ),color = "blue",linetype = "solid")+
+    geom_line(aes(y = P_true),color = "red",linetype = "dashed")+
+    geom_point(data=df_ind, aes(x=P_true, y=pi_p,color=log(x1-x2)), size=1.5)+
+    #scale_color_viridis_c(option = "C") +
+    scale_color_continuous(low='tan1', high='brown4')+
+    labs(title=paste0('Total'))+xlab(NULL)+ylab(NULL)+
+    theme_classic()
+  plot_list[[16]] = p
+  
+  
+  # Display in 4 x 4 grid
+  p = wrap_plots(plot_list, ncol = 4)+
+    plot_annotation(title=paste0('Subj',SubjID_val),
+                    subtitle='p1 vs. pi(p1) plot')
+  ggsave(filename, plot = p, width=11, height=10)
+}
+```
+
+### Statistics across x1, x2
+
+# JRF Summary
+
+-   5 Numerosity: 200, 300, 400, 500, 600
+
+-   11 Probabilities: .01, .05, .10, .25, .40, .50, .60, .75, .90, .95, .99
+
+### [P_reported vs. P_true] plot for each numerosity
+
+**Total Subject**
+
+```{r}
+Num_val_vec = c(200, 300, 400, 500, 600)
+plot_list = list()
+for(i in 1:5){
+  #subset data(Task1 = JDF)
+  df_ex = df_total %>%
+    filter(Task==1, Numerosity==Num_val_vec[i]) %>% select(P_true, P_reported)
+  # make summary statistics
+  df_summary = df_ex %>% group_by(P_true) %>%
+    summarise(
+      q1 = quantile(P_reported, 0.2, na.rm = TRUE),
+      q2 = quantile(P_reported, 0.4, na.rm = TRUE),
+      q3 = quantile(P_reported, 0.6, na.rm = TRUE),
+      q4 = quantile(P_reported, 0.8, na.rm = TRUE),
+      P_rep_mean = mean(P_reported, na.rm = TRUE)
+    )
+  # make plot
+  p = df_summary %>% ggplot(aes(x=P_true)) +
+    geom_ribbon(aes(ymin = q1, ymax = q4), fill = "grey70") +
+    geom_ribbon(aes(ymin = q2, ymax = q3), fill = "grey50") +
+    geom_line(aes(y = P_rep_mean))+
+    geom_line(aes(y = P_true),color = "red",linetype = "dashed")+
+    theme_classic()+
+    labs(title=paste0('Numerosity = ',Num_val_vec[i]))+xlab('P_true')+ylab('P_reported')
+  plot_list[[i]] = p
+}
+
+# Display in 4 x 4 grid
+wrap_plots(plot_list)
+```
+
+**Each Subject**
+
+```{r}
+Num_vec = c(200, 300, 400, 500, 600)
+  
+for(i in 1:75){
+  df_ind = df_total %>% filter(Task ==1, SubjID== i)
+  plot_list = list()
+  for(j in 1:5){
+    p = df_ind %>% filter(Numerosity == Num_vec[j]) %>%
+      ggplot(aes(x=P_true, y=P_reported)) + geom_point()+
+      geom_line(aes(y = P_true),color = "red",linetype = "dashed")+
+      labs(title=paste0('Numerosisty = ',Num_vec[j]))+
+      theme_bw()
+    plot_list[[j]] = p
+  }
+  p = wrap_plots(plot_list, ncol=3)+
+    plot_annotation(title=paste0('Subj',i), subtitle='P_true vs. P_reported')
+  # ggsave(paste0('./img/RF_ind/RF_S',i,'.png'), plot = p, width=11, height=6)
+}
+
+```
+
+### [P_reported-P_true] distribution for each numerosity
+
+```{r}
+df_total_JDF = df_total %>% filter(Task==1) %>%
+  mutate(P_diff = P_reported-P_true, P_diff_abs = abs(P_reported-P_true))
+
+df_total_JDF  %>%
+  ggplot(aes(x=factor(Numerosity), y=P_diff))+
+    geom_violin()+theme_minimal()
+
+df_total_JDF  %>%
+  ggplot(aes(x=factor(Numerosity), y=P_reported))+
+    geom_violin()+theme_minimal()
+
+print("P_reported~Numerosity ANOVA")
+anova_result <- aov(P_reported ~ Numerosity, data = df_total_JDF)
+summary(anova_result)
+print("P_diff~Numerosity ANOVA")
+anova_result <- aov(P_diff ~ Numerosity, data = df_total_JDF)
+summary(anova_result)
+print("|P_diff|~Numerosity ANOVA")
+anova_result <- aov(P_diff_abs ~ Numerosity, data = df_total_JDF)
+summary(anova_result)
+
+df_total_JDF %>% group_by(Numerosity) %>%
+  summarise(
+    P_dabs_mean = mean(P_diff_abs, na.rm = TRUE),
+    P_dabs_sd = sd(P_diff_abs, na.rm = TRUE),
+    P_d_mean = mean(P_diff, na.rm = TRUE),
+    P_d_sd = sd(P_diff, na.rm = TRUE),
+    n = n()
+  ) %>% round(3)
+```

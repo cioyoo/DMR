@@ -1,0 +1,1033 @@
+---
+title: "Bayesian Analysis"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidybayes)
+library(ggplot2)
+library(rstan)
+library(bayesplot)
+library(loo)
+library(patchwork)
+library(GGally)
+library(irr)
+source('../code/utils/stan_util.R') 
+source('../code/utils/TSS_util.R')
+# Load the data
+df_total = read.csv("../data/df_total.csv")
+# Stan option
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+# Create directory to save the fitted model
+resultPath= '../output/Bayesian_results'
+if(!dir.exists(resultPath)){dir.create(resultPath)}
+```
+
+# simpleLO
+
+## Posterior Distribution
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'simpleLO'
+variables = c('gamma', 'alpha', 'sigmaCE')
+stanname = 'DMR_simpleLogit'
+Nsubj = 75
+RUN = TRUE
+
+if(RUN){
+  # 1. Run MCMC sampling ===============================================
+  model = stan_model(paste0('../code/stanmodel/continuous/', stanname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  # 2. Save the results ===============================================
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+  df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_summary.rds'))
+}
+```
+
+Check MCMC convergence, estimated parameter, model fit(loo)
+
+```{r}
+# Setting
+modelname = 'simpleLO'
+variables = c('gamma','alpha', 'sigmaCE')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title = modelname, diag = list(continuous='barDiag'))+
+  theme_bw()
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+# Rhat > 1.01
+cat('number of Rhat > 1.01:', sum(df_summary$max.Rhat>1.01), '\n')
+print(df_summary[which(df_summary$max.Rhat>1.01),])
+```
+
+## Parameter recovery
+
+-   gamma, alpha, sigma / r=
+
+Make simulated data
+
+```{r}
+modelname = 'simpleLO'
+variables = c('gamma', 'alpha', 'sigmaCE')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # parameter setting -----------------------------------------
+  gamma = df_summary[i,1]
+  alpha=df_summary[i,2]
+  sigma = df_summary[i,3]
+  # load data of subj i----------------------------------------
+  subj_i_vec = (idx_i+1):(idx_i+NT)
+  p = df_sim[subj_i_vec,'P_true']
+  x1 = df_sim[subj_i_vec,'x1']
+  x2 = df_sim[subj_i_vec,'x2']
+  # make simulated data of subj i----------------------------------------
+  pip = inv_logit(gamma * logit(p)) # pi(p)
+  CEpred = (pip * x1^alpha + (1-pip) * x2^alpha)^(1/alpha)
+  df_sim$CE[subj_i_vec] = CEpred + rnorm(NT, 0, sigma)
+}
+
+write.csv(df_sim, file=paste0('../data/simulated/Bayesian/', modelname, '.csv'),
+          row.names=FALSE)
+```
+
+Run MCMC on simulated data
+
+```{r}
+modelname = 'simpleLO'
+stanname = 'DMR_simpleLogit'
+variables = c('gamma', 'alpha', 'sigmaCE')
+Nsubj = 75 
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/continuous/', stanname, '.stan'))
+  df_sim = read.csv(paste0('../data/simulated/Bayesian/', modelname, '.csv'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti', df=df_sim)
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+  df_summary_rcv = MCMC_summary(fit_list, variables, convergence=FALSE)
+  saveRDS(df_summary_rcv, paste0(resultPath, '/', modelname, '_simul_summary.rds'))
+}
+```
+
+Visualize the parameter recovery results
+
+```{r}
+modelname = 'simpleLO'
+variables = c('gamma', 'alpha', 'sigmaCE')
+
+df_summary_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul_summary.rds'))
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+
+# All subject
+for(param in variables){
+  x = df_summary[[param]]
+  y = df_summary_rcv[[param]]
+  cor = cor(x,y)
+  plot(x, y, xlab='simulated parameter', ylab='recovered parameter',
+       main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+## Test-retest reliability
+
+Run MCMC sampling separately for session 1&2.
+
+```{r}
+modelname = 'simpleLO'
+stanname = 'DMR_simpleLogit'
+variables = c('gamma', 'alpha', 'sigmaCE')
+Nsubj = 51
+RUN = TRUE
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# Run MCMC sampling
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/continuous/', stanname, '.stan'))
+  fit_list_s1 = list(); fit_list_s2 = list()
+  for(i in 1:Nsubj){
+    data_list_s1 = make_stan_data(i, 'conti', df=df_s1)
+    data_list_s2 = make_stan_data(i, 'conti', df=df_s2)
+    fit_list_s1[[i]] = sampling(model, data_list_s1, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    fit_list_s2[[i]] = sampling(model, data_list_s2, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+  saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+  df_summary_s1 = MCMC_summary(fit_list_s1, variables, convergence=FALSE)
+  df_summary_s2 = MCMC_summary(fit_list_s2, variables, convergence=FALSE)
+  saveRDS(df_summary_s1, paste0(resultPath, '/', modelname, '_s1_summary.rds'))
+  saveRDS(df_summary_s2, paste0(resultPath, '/', modelname, '_s2_summary.rds'))
+}
+```
+
+Check test-retest reliability
+
+```{r}
+modelname = 'simpleLO'
+variables = c('gamma', 'alpha', 'sigmaCE')
+
+df_summary_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1_summary.rds'))
+df_summary_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2_summary.rds'))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+```
+
+# LLO
+
+## Posterior Distribution
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'LLO'
+variables = c('gamma', 'L0', 'alpha', 'sigmaCE')
+stanname = 'LL_DMR'
+Nsubj = 75
+RUN = TRUE
+
+if(RUN){
+  # 1. Run MCMC sampling ===============================================
+  model = stan_model(paste0('../code/stanmodel/continuous/', stanname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  # 2. Save the results ===============================================
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+  df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_summary.rds'))
+}
+```
+
+Check MCMC convergence, estimated parameter, model fit(loo)
+
+```{r message=FALSE}
+# Setting
+modelname = 'LLO'
+variables = c('gamma', 'L0', 'alpha', 'sigmaCE')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title = modelname, diag = list(continuous='barDiag'))+
+  theme_bw()
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+# Rhat > 1.01
+cat('number of Rhat > 1.01:', sum(df_summary$max.Rhat>1.01), '\n')
+print(df_summary[which(df_summary$max.Rhat>1.01),])
+```
+
+## Parameter recovery
+
+Make simulated data
+
+```{r}
+modelname = 'LLO'
+variables = c('gamma', 'L0', 'alpha', 'sigmaCE')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # parameter setting -----------------------------------------
+  gamma = df_summary[i,1]
+  L0 = df_summary[i,2]
+  alpha=df_summary[i,3]
+  sigma = df_summary[i,4]
+  # load data of subj i----------------------------------------
+  subj_i_vec = (idx_i+1):(idx_i+NT)
+  p = df_sim[subj_i_vec,'P_true']
+  x1 = df_sim[subj_i_vec,'x1']
+  x2 = df_sim[subj_i_vec,'x2']
+  # make simulated data of subj i----------------------------------------
+  pip = inv_logit(gamma * logit(p) + (1-gamma)*L0) # pi(p)
+  CEpred = (pip * x1^alpha + (1-pip) * x2^alpha)^(1/alpha)
+  df_sim$CE[subj_i_vec] = CEpred + rnorm(NT, 0, sigma)
+}
+
+write.csv(df_sim, file=paste0('../data/simulated/Bayesian/', modelname, '.csv'),
+          row.names=FALSE)
+```
+
+Run MCMC on simulated data
+
+```{r}
+modelname = 'LLO'
+variables = c('gamma', 'L0', 'alpha', 'sigmaCE')
+stanname = 'LL_DMR'
+Nsubj = 75 
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/continuous/', stanname, '.stan'))
+  df_sim = read.csv(paste0('../data/simulated/Bayesian/', modelname, '.csv'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'conti', df=df_sim)
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+  df_summary_rcv = MCMC_summary(fit_list, variables, convergence=FALSE)
+  saveRDS(df_summary_rcv, paste0(resultPath, '/', modelname, '_simul_summary.rds'))
+}
+```
+
+Visualize the parameter recovery results
+
+```{r}
+modelname = 'LLO'
+variables = c('gamma', 'L0', 'alpha', 'sigmaCE')
+
+df_summary_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul_summary.rds'))
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+
+# All subject
+for(param in variables){
+  x = df_summary[[param]]
+  y = df_summary_rcv[[param]]
+  cor = cor(x,y)
+  plot(x, y, xlab='simulated parameter', ylab='recovered parameter',
+       main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+## Test retest reliability
+
+Run MCMC separately on session 1 & 2.
+
+```{r}
+modelname = 'LLO'
+variables = c('gamma', 'L0', 'alpha', 'sigmaCE')
+stanname = 'LL_DMR'
+Nsubj = 51
+RUN = TRUE
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# Run MCMC sampling
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/continuous/', stanname, '.stan'))
+  fit_list_s1 = list(); fit_list_s2 = list()
+  for(i in 1:Nsubj){
+    data_list_s1 = make_stan_data(i, 'conti', df=df_s1)
+    data_list_s2 = make_stan_data(i, 'conti', df=df_s2)
+    fit_list_s1[[i]] = sampling(model, data_list_s1, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    fit_list_s2[[i]] = sampling(model, data_list_s2, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+  saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+  df_summary_s1 = MCMC_summary(fit_list_s1, variables, convergence=FALSE)
+  df_summary_s2 = MCMC_summary(fit_list_s2, variables, convergence=FALSE)
+  saveRDS(df_summary_s1, paste0(resultPath, '/', modelname, '_s1_summary.rds'))
+  saveRDS(df_summary_s2, paste0(resultPath, '/', modelname, '_s2_summary.rds'))
+}
+```
+
+Check the test retest reliability
+
+```{r}
+modelname = 'LLO'
+variables = c('gamma', 'L0', 'alpha', 'sigmaCE')
+
+df_summary_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1_summary.rds'))
+df_summary_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2_summary.rds'))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+```
+
+# TSS_lambda (TSS5)
+
+-   free parameter:
+
+-   summed delta loo = 25012.8
+
+-   MCMC convergence: good-moderate (Rhat\<1.01 except subj21(3.2), subj23(1.06), subj45(1.01))
+
+## Posterior distribution
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS_lambda'
+stanname = 'TSS5'
+Nsubj = 75
+RUN = FALSE
+
+if(RUN){
+  # 1. Run MCMC sampling ===============================================
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  # 2. Save the results ===============================================
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+  df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_summary.rds'))
+}
+```
+
+Check MCMC convergence, estimated parameter, model fit(loo)
+
+```{r message=FALSE}
+# Setting
+modelname = 'TSS_lambda'
+variables = c('gamma','alpha', 'lambda')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title=modelname, diag = list(continuous='barDiag'))+
+  theme_bw()
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo), '\n')
+# Rhat > 1.01
+cat('number of Rhat > 1.01:', sum(df_summary$max.Rhat>1.01), '\n')
+print(df_summary[which(df_summary$max.Rhat>1.01),])
+```
+
+## Parameter recovery
+
+-   gamma, alpha, lambda / r= 1, 0.99, 1
+
+Make simulated data
+
+```{r}
+modelname = 'TSS_lambda'
+variables = c('gamma', 'alpha', 'lambda')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # Change accordingly to the model ------------
+  G_i = df_summary$gamma[i]
+  A_i = df_summary$alpha[i]
+  L_i = df_summary$lambda[i]
+  # ---------------------------------------------
+  for(j in 1:NT){
+    idx = idx_i+j
+    # Change accordingly to the model ---------------
+    arg_list = list(gamma=G_i, alpha_gain=A_i, alpha_loss=A_i, lambda=L_i)
+    df_sim$CE[idx] = TSS_simul(p= df_sim$P_true[idx], x1= df_sim$x1[idx], x2= df_sim$x2[idx],
+                               V_func = V_pt, V_func_arg = arg_list, iter=1)
+    # ------------------------------------------------
+  }
+}
+write.csv(df_sim, file=paste0('../data/simulated/Bayesian/', modelname, '.csv'),
+          row.names=FALSE)
+```
+
+Run MCMC sampling on a simulated data
+
+```{r}
+modelname = 'TSS_lambda'
+stanname = 'TSS5'
+Nsubj = 75 
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  df_sim = read.csv(paste0('../data/simulated/Bayesian/', modelname, '.csv'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS', df=df_sim)
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+}
+
+```
+
+Visualize the parameter recovery results
+
+```{r}
+modelname = 'TSS_lambda'
+variables = c('gamma', 'alpha', 'lambda')
+
+fit_list_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MCMC_summary(fit_list, variables)
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+
+# All subject
+for(param in variables){
+  x = df_summary[[param]]
+  y = df_summary_rcv[[param]]
+  cor = cor(x,y)
+  plot(x, y, xlab='simulated parameter', ylab='recovered parameter',
+       main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+## Test-retest reliability
+
+-   ICC of gamma, alpha, lambda = 0.82, 0.72, 0.84
+
+Run MCMC sampling separately for session1 and session2.
+
+```{r}
+modelname = 'TSS_lambda'
+stanname = 'TSS5'
+Nsubj = 51
+RUN = TRUE
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# Run MCMC sampling
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  fit_list_s1 = list(); fit_list_s2 = list()
+  for(i in 1:Nsubj){
+    data_list_s1 = make_stan_data(i, 'TSS', df=df_s1)
+    data_list_s2 = make_stan_data(i, 'TSS', df=df_s2)
+    fit_list_s1[[i]] = sampling(model, data_list_s1, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    fit_list_s2[[i]] = sampling(model, data_list_s2, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+  saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+  df_summary_s1 = MCMC_summary(fit_list_s1, variables, convergence=FALSE)
+  df_summary_s2 = MCMC_summary(fit_list_s2, variables, convergence=FALSE)
+  saveRDS(df_summary_s1, paste0(resultPath, '/', modelname, '_s1_summary.rds'))
+  saveRDS(df_summary_s2, paste0(resultPath, '/', modelname, '_s2_summary.rds'))
+}
+```
+
+Check test-retest reliability
+
+```{r}
+modelname = 'TSS_lambda'
+variables = c('gamma', 'alpha', 'lambda')
+
+df_summary_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1_summary.rds'))
+df_summary_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2_summary.rds'))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+```
+
+# TSS_alpha (TSS7)
+
+## Posterior distribution
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS_alpha'
+stanname = 'TSS7'
+Nsubj = 75
+RUN = TRUE
+
+if(RUN){
+  # 1. Run MCMC sampling ===============================================
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  # 2. Save the results ===============================================
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+  df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_summary.rds'))
+}
+```
+
+Check MCMC convergence, estimated parameter, model fit(loo)
+
+```{r}
+# Setting
+modelname = 'TSS_alpha'
+variables = c('gamma','alpha_gain', 'alpha_loss')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title=modelname, diag = list(continuous='barDiag'))+
+  theme_bw()
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo), '\n')
+# Rhat > 1.01
+cat('number of Rhat > 1.01:', sum(df_summary$max.Rhat>1.01), '\n')
+print(df_summary[which(df_summary$max.Rhat>1.01),])
+```
+
+## Parameter recovery
+
+Make simulated data
+
+```{r message = FALSE}
+modelname = 'TSS_alpha'
+variables = c('gamma', 'alpha_gain', 'alpha_loss')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # Change accordingly to the model ------------
+  G_i = df_summary$gamma[i]
+  AG_i = df_summary$alpha_gain[i]
+  AL_i = df_summary$alpha_loss[i]
+  # ---------------------------------------------
+  for(j in 1:NT){
+    idx = idx_i+j
+    # Change accordingly to the model ---------------
+    arg_list = list(gamma=G_i, alpha_gain=AG_i, alpha_loss=AL_i, lambda=1)
+    df_sim$CE[idx] = TSS_simul(p= df_sim$P_true[idx], x1= df_sim$x1[idx], x2= df_sim$x2[idx],
+                               V_func = V_pt, V_func_arg = arg_list, iter=1)
+    # ------------------------------------------------
+  }
+}
+write.csv(df_sim, file=paste0('../data/simulated/Bayesian/', modelname, '.csv'),
+          row.names=FALSE)
+```
+
+Run MCMC on a simulated data
+
+```{r}
+modelname = 'TSS_alpha'
+stanname = 'TSS7'
+variables = c('gamma', 'alpha_gain', 'alpha_loss')
+Nsubj = 75 
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  df_sim = read.csv(paste0('../data/simulated/Bayesian/', modelname, '.csv'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS', df=df_sim)
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+  df_summary = MCMC_summary(fit_list, variables, convergence=FALSE)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_simul_summary.rds'))
+}
+
+```
+
+Visualize parameter recovery result
+
+```{r}
+modelname = 'TSS_alpha'
+variables = c('gamma', 'alpha_gain', 'alpha_loss')
+
+fit_list_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MCMC_summary(fit_list, variables)
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+
+# All subject
+for(param in variables){
+  x = df_summary[[param]]
+  y = df_summary_rcv[[param]]
+  cor = cor(x,y)
+  plot(x, y, xlab='simulated parameter', ylab='recovered parameter',
+       main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+## Test retest reliability
+
+Run MCMC separately for session 1 & 2.
+
+```{r}
+modelname = 'TSS_alpha'
+stanname = 'TSS7'
+Nsubj = 51
+RUN = TRUE
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# Run MCMC sampling
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  fit_list_s1 = list(); fit_list_s2 = list()
+  for(i in 1:Nsubj){
+    data_list_s1 = make_stan_data(i, 'TSS', df=df_s1)
+    data_list_s2 = make_stan_data(i, 'TSS', df=df_s2)
+    fit_list_s1[[i]] = sampling(model, data_list_s1, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    fit_list_s2[[i]] = sampling(model, data_list_s2, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+  saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+  df_summary_s1 = MCMC_summary(fit_list_s1, variables, convergence=FALSE)
+  df_summary_s2 = MCMC_summary(fit_list_s2, variables, convergence=FALSE)
+  saveRDS(df_summary_s1, paste0(resultPath, '/', modelname, '_s1_summary.rds'))
+  saveRDS(df_summary_s2, paste0(resultPath, '/', modelname, '_s2_summary.rds'))
+}
+```
+
+Check test-retest reliability
+
+```{r}
+modelname = 'TSS_alpha'
+variables = c('gamma', 'alpha_gain', 'alpha_loss')
+
+df_summary_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1_summary.rds'))
+df_summary_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2_summary.rds'))
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+```
+
+# TSS_full (TSS8)
+
+summed delta loo = 25894.0
+
+## Posterior distribution
+
+Run MCMC sampling
+
+```{r}
+# Setting
+modelname = 'TSS_full'
+stanname = 'TSS8'
+Nsubj = 75
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS')
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, file = paste0(resultPath,'/', modelname, '.rds'))
+}
+```
+
+Check MCMC convergence, estimated parameter, model fit(loo)
+
+```{r message=FALSE}
+# Setting
+modelname = 'TSS_full'
+variables = c('gamma','alpha_gain', 'alpha_loss', 'lambda')
+RUN=TRUE
+
+if(RUN){
+  fit_list = readRDS(paste0(resultPath,'/', modelname, '.rds'))
+  df_summary = MCMC_summary(fit_list, variables, modelcomp=TRUE)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_summary.rds'))
+}else{
+  df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+}
+# table
+round(df_summary,3)
+# parameter distribution
+df_summary %>%
+  ggpairs(columns= variables, title='TSS_full', diag = list(continuous='barDiag'))+
+  theme_bw()
+# Summed loo
+cat('summed loo:', sum(df_summary$loo), '\n')
+cat('summed delta loo:', sum(df_summary$loo) + 1000 * length(df_summary$loo), '\n')
+# Rhat > 1.01
+cat('number of Rhat > 1.01:', sum(df_summary$max.Rhat>1.01), '\n')
+print(df_summary[which(df_summary$max.Rhat>1.01),])
+```
+
+## Parameter recovery
+
+-   gamma, alpha_gain, alpha_loss, lambda / r=
+
+Make simulated data
+
+```{r}
+modelname = 'TSS_full'
+variables = c('gamma', 'alpha_gain', 'alpha_loss', 'lambda')
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:75){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # Change accordingly to the model ------------
+  G_i = df_summary$gamma[i]
+  AG_i = df_summary$alpha_gain[i]
+  AL_i = df_summary$alpha_loss[i]
+  L_i = df_summary$lambda[i]
+  # ---------------------------------------------
+  for(j in 1:NT){
+    idx = idx_i+j
+    # Change accordingly to the model ---------------
+    arg_list = list(gamma=G_i, alpha_gain=AG_i, alpha_loss=AL_i, lambda=L_i)
+    df_sim$CE[idx] = TSS_simul(p= df_sim$P_true[idx], x1= df_sim$x1[idx], x2= df_sim$x2[idx],
+                               V_func = V_pt, V_func_arg = arg_list, iter=1)
+    # ------------------------------------------------
+  }
+}
+write.csv(df_sim, file=paste0('../data/simulated/Bayesian/', modelname, '.csv'),
+          row.names=FALSE)
+```
+
+Run MCMC sampling on a simulated data
+
+```{r}
+modelname = 'TSS_full'
+stanname = 'TSS8'
+Nsubj = 75 # number of different initial values
+RUN = TRUE
+
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  df_sim = read.csv(paste0('../data/simulated/Bayesian/', modelname, '.csv'))
+  fit_list = list()
+  for(i in 1:Nsubj){
+    data_list = make_stan_data(i, 'TSS', df=df_sim)
+    fit_list[[i]] = sampling(model, data_list, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list, paste0(resultPath, '/', modelname, '_simul.rds'))
+}
+
+```
+
+Visualize the parameter recovery results
+
+```{r}
+modelname = 'TSS_full'
+variables = c('gamma', 'alpha_gain', 'alpha_loss', 'lambda')
+
+fit_list_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul.rds'))
+df_summary_rcv = MCMC_summary(fit_list, variables)
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+
+# All subject
+for(param in variables){
+  x = df_summary[[param]]
+  y = df_summary_rcv[[param]]
+  cor = cor(x,y)
+  plot(x, y, xlab='simulated parameter', ylab='recovered parameter',
+       main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+## Test-retest reliability
+
+-   ICC of gamma, alpha_gain, alpha_loss, lambda = 0.83, 0.72, 0.69, 0.85
+
+Compute MLE separately for session1 and session2.
+
+```{r}
+modelname = 'TSS_full'
+stanname = 'TSS8'
+Nsubj = 51
+RUN = TRUE
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# Run MCMC sampling
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  fit_list_s1 = list(); fit_list_s2 = list()
+  for(i in 1:Nsubj){
+    data_list_s1 = make_stan_data(i, 'TSS', df=df_s1)
+    data_list_s2 = make_stan_data(i, 'TSS', df=df_s2)
+    fit_list_s1[[i]] = sampling(model, data_list_s1, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    fit_list_s2[[i]] = sampling(model, data_list_s2, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list_s1, paste0(resultPath, '/', modelname, '_s1.rds'))
+  saveRDS(fit_list_s2, paste0(resultPath, '/', modelname, '_s2.rds'))
+}
+```
+
+Check test-retest reliability
+
+```{r}
+modelname = 'TSS_full'
+variables = c('gamma', 'alpha_gain','alpha_loss', 'lambda')
+
+fit_list_s1 = readRDS(paste0(resultPath, '/', modelname, '_s1.rds'))
+fit_list_s2 = readRDS(paste0(resultPath, '/', modelname, '_s2.rds'))
+df_summary_s1 = MCMC_summary(fit_list_s1, variables)
+df_summary_s2 = MCMC_summary(fit_list_s2, variables)
+
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_s1[[variables[i]]]
+  y = df_summary_s2[[variables[i]]]
+  df_comp = data.frame(s1= x, s2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+
+
+```
+
+## Within block reliability
+
+```{r}
+modelname = 'TSS_full'
+stanname = 'TSS8'
+Nsubj = 5
+RUN = TRUE
+
+# load data
+df_b1 = df_total%>%filter(Block==1, Task==2)
+df_b2 = df_total%>%filter(Block==2, Task==2)
+
+# Run MCMC sampling
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  fit_list_b1 = list(); fit_list_b2 = list()
+  for(i in 1:Nsubj){
+    data_list_b1 = make_stan_data(i, 'TSS', df=df_b1)
+    data_list_b2 = make_stan_data(i, 'TSS', df=df_b2)
+    fit_list_b1[[i]] = sampling(model, data_list_b1, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    fit_list_b2[[i]] = sampling(model, data_list_b2, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list_b1, paste0(resultPath, '/', modelname, '_b1.rds'))
+  saveRDS(fit_list_b2, paste0(resultPath, '/', modelname, '_b2.rds'))
+}
+```
+
+```{r}
+modelname = 'TSS_full'
+variables = c('gamma', 'alpha_gain','alpha_loss', 'lambda')
+
+fit_list_b1 = readRDS(paste0(resultPath, '/', modelname, '_b1.rds'))
+fit_list_b2 = readRDS(paste0(resultPath, '/', modelname, '_b2.rds'))
+df_summary_b1 = MCMC_summary(fit_list_b1, variables)
+df_summary_b2 = MCMC_summary(fit_list_b2, variables)
+
+# test-retest correlation
+for(i in 1:length(variables)){
+  x = df_summary_b1[[variables[i]]]
+  y = df_summary_b2[[variables[i]]]
+  df_comp = data.frame(b1= x, b2= y)
+  icc_val = icc(df_comp, model = "twoway", type = "consistency", unit = "single")$value
+  cor = cor(x,y)
+  plot(x, y, main=paste0(variables[i],', r = ',round(cor,2), ', ICC = ',round(icc_val,2)), xlab='Session1', ylab='session2')
+  abline(0,1,col='red',lty=2)
+}
+
+
+```

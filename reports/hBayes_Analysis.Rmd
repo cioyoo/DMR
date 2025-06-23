@@ -1,0 +1,244 @@
+---
+title: "Heirarchical Bayesian Analysis"
+output: html_notebook
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidybayes)
+library(ggplot2)
+library(rstan)
+library(bayesplot)
+library(loo)
+library(patchwork)
+library(GGally)
+library(ggridges)
+# Load the data
+df_total = read.csv("../data/df_total.csv")
+source("../code/utils/stan_util.R")
+source("../code/utils/TSS_util.R")
+# Stan option
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+# Create directory to save the fitted model
+resultPath= '../output/hBayes_results'
+if(!dir.exists(resultPath)){dir.create(resultPath)}
+```
+
+# TSS lambda
+
+## MCMC sampling
+
+Run MCMC sampling
+
+```{r}
+#Setting
+modelname = 'TSS_lambda_h'
+variables = c('gamma', 'alpha', 'lambda')
+Nsubj = 20
+Tmax = 165
+subj_vec = 1:Nsubj
+RUN = TRUE
+
+if(RUN){
+  # 1. Run MCMC sampling ==========================================================
+  model = stan_model(file = paste0('../code/stanmodel/hBayes/', modelname, '.stan'))
+  data_list = make_stan_data_h(subj_vec, Tmax)
+  fit = sampling(model, data=data_list, seed = 1234, chain=4, iter=2000, warmup = 1000)
+  saveRDS(fit, file=paste0(resultPath,'/', modelname, '.rds'))
+  # 2. Save the summary results =====================================================
+  df_summary = hB_summary(fit, variables)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_summary.rds'))
+}
+```
+
+Check posterior samples, compare it with the individual Bayesian results
+
+```{r message=FALSE}
+modelname = 'TSS_lambda_h'
+variables = c('gamma', 'alpha', 'lambda')
+group_variables = c('mu_gamma', 'mu_alpha', 'mu_lambda')
+fit = readRDS(file = paste0(resultPath,'/', modelname, '.rds'))
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+
+# 2. Group parameter distribution ==============================================
+mcmc_pairs(fit, pars=c(group_variables), off_diag_args = list(size=1, alpha=0.3))
+
+# 3. Individual parameter distribution (ridge plot) ============================
+for(param in variables){
+  df_param = as.data.frame(extract(fit, pars=param)[[1]])
+  colnames(df_param) = 1:ncol(df_param)
+  df_param_long = pivot_longer(df_param, cols = everything(),
+                               names_to = "SubjID", values_to = param)
+  df_param_long = df_param_long %>%
+  mutate(SubjID = factor(SubjID, levels = sort(unique(as.integer(SubjID)))))
+  p = df_param_long %>% ggplot(aes(x=!!sym(param), y=SubjID)) +
+    geom_density_ridges()+
+    theme_bw()
+  print(p)
+}
+# 3. compare it with non-hierarchical model result ============================
+#fit_list = readRDS(file=('../output/Bayesian_results/TSS_lambda_s1.rds'))
+df_ind_summary = MCMC_summary(fit_list, variables)
+
+for(param in variables){
+  x=df_ind_summary[1:Nsubj,param]
+  y=df_summary[1:Nsubj,param]
+  plot(x,y, main=paste0(param, '; r = ',round(cor(x,y),3)), ylab='hBayes',
+       xlab='indBayes')
+  abline(0,1,col='red',lty='dashed')
+}
+```
+
+## Parameter Recovery
+
+Make Simulated data
+
+```{r}
+modelname = 'TSS_lambda_h'
+variables = c('gamma', 'alpha', 'lambda')
+Nsubj = 20
+
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+df_sim = df_total %>% filter(Task == 2) %>% select(SubjID, P_true, x1, x2)
+
+for(i in 1:Nsubj){
+  if(i <=51){NT=330}else{NT=165}
+  if(i <=51){idx_i=330*(i-1)}else{idx_i=330*51+165*(i-52)}
+  # Change accordingly to the model ------------
+  G_i = df_summary$gamma[i]
+  A_i = df_summary$alpha[i]
+  L_i = df_summary$lambda[i]
+  # ---------------------------------------------
+  for(j in 1:NT){
+    idx = idx_i+j
+    # Change accordingly to the model ---------------
+    arg_list = list(gamma=G_i, alpha_gain=A_i, alpha_loss=A_i, lambda=L_i)
+    df_sim$CE[idx] = TSS_simul(p= df_sim$P_true[idx], x1= df_sim$x1[idx], x2= df_sim$x2[idx],
+                               V_func = V_pt, V_func_arg = arg_list, iter=1)
+    # ------------------------------------------------
+  }
+}
+write.csv(df_sim, file=paste0('../data/simulated/hBayes/', modelname, '.csv'),
+          row.names=FALSE)
+```
+
+Run MCMC sampling on a simulated data
+
+```{r}
+#Setting
+modelname = 'TSS_lambda_h'
+variables = c('gamma', 'alpha', 'lambda')
+Nsubj = 20
+Tmax = 165
+subj_vec = 1:Nsubj
+RUN = TRUE
+
+df_sim = read.csv(file = paste0('../data/simulated/hBayes/',modelname, '.csv'))
+
+if(RUN){
+  # 1. Run MCMC sampling ===========================================================
+  model = stan_model(file = paste0('../code/stanmodel/hBayes/', modelname, '.stan'))
+  data_list = make_stan_data_h(subj_vec, Tmax, df=df_sim)
+  fit = sampling(model, data=data_list, seed = 1234, chain=4, iter=2000, warmup = 1000)
+  saveRDS(fit, file=paste0(resultPath,'/', modelname, '_simul.rds'))
+  # 2. Save the summary results =====================================================
+  df_summary = hB_summary(fit, variables)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_simul_summary.rds'))
+}
+```
+
+Visualize parameter recovery results
+
+```{r}
+modelname = 'TSS_lambda_h'
+variables = c('gamma', 'alpha', 'lambda')
+
+df_summary_rcv = readRDS(paste0(resultPath, '/', modelname, '_simul_summary.rds'))
+df_summary = readRDS(paste0(resultPath, '/', modelname, '_summary.rds'))
+
+# All subject
+for(param in variables){
+  x = df_summary[[param]]
+  y = df_summary_rcv[[param]]
+  cor = cor(x,y)
+  plot(x, y, xlab='simulated parameter', ylab='recovered parameter',
+       main=paste0(param, ', r = ',round(cor,2)))
+  abline(a=0,b=1,col='red',lty=2)
+}
+```
+
+## Test Retest reliability
+
+```{r}
+modelname = 'TSS_lambda_h'
+stanname = 'TSS5'
+Nsubj = 51
+RUN = TRUE
+
+# load data
+df_s1 = df_total%>%filter(Session==1, Task==2)
+df_s2 = df_total%>%filter(Session==2, Task==2)
+
+# Run MCMC sampling
+if(RUN){
+  model = stan_model(paste0('../code/stanmodel/TSS/', stanname, '.stan'))
+  fit_list_s1 = list(); fit_list_s2 = list()
+  for(i in 1:Nsubj){
+    data_list_s1 = make_stan_data(i, 'TSS', df=df_s1)
+    data_list_s2 = make_stan_data(i, 'TSS', df=df_s2)
+    fit_list_s1[[i]] = sampling(model, data_list_s1, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    fit_list_s2[[i]] = sampling(model, data_list_s2, chains = 4,iter = 2000, warmup = 1000,
+                             seed = 1234, refresh=0)
+    message(paste("✓ Subj", i, "completed."))
+  }
+  saveRDS(fit_list_s1[1:51], paste0(resultPath, '/', modelname, '_s1.rds'))
+  saveRDS(fit_list_s2[1:51], paste0(resultPath, '/', modelname, '_s2.rds'))
+}
+```
+
+# ETC
+
+Compare with individual Bayesian estimation
+
+```{r}
+fit_list_s1 = readRDS('../output/Bayesian_results/TSS_lambda_s1.rds')[1:Nsubj]
+df_indBayes_summary = MCMC_summary(fit_list_s1, variables)
+
+for(param in variables){
+  x=df_indBayes_summary[1:Nsubj,param]
+  y=df_hBayes_summary[,param]
+  plot(x,y, main=paste0(param, '; r = ',round(cor(x,y),3)), ylab='hBayes(N=33)',
+       xlab='indBayes(N=330)')
+  abline(0,1,col='red',lty='dashed')
+}
+```
+
+# TSS alpha
+
+## MCMC sampling
+
+Run MCMC sampling
+
+```{r}
+#Setting
+modelname = 'TSS_alpha_h'
+variables = c('gamma', 'alpha', 'lambda')
+Nsubj = 20
+Tmax = 165
+subj_vec = 1:Nsubj
+RUN = TRUE
+
+if(RUN){
+  # 1. Run MCMC sampling ==========================================================
+  model = stan_model(file = paste0('../code/stanmodel/hBayes/', modelname, '.stan'))
+  data_list = make_stan_data_h(subj_vec, Tmax)
+  fit = sampling(model, data=data_list, seed = 1234, chain=4, iter=2000, warmup = 1000)
+  saveRDS(fit, file=paste0(resultPath,'/', modelname, '.rds'))
+  # 2. Save the summary results =====================================================
+  df_summary = hB_summary(fit, variables)
+  saveRDS(df_summary, paste0(resultPath, '/', modelname, '_summary.rds'))
+}
+```
